@@ -1,4 +1,3 @@
-
 import os
 import time
 import json
@@ -13,7 +12,7 @@ HEADERS = {
 }
 
 def geocode_city(city_query: str):
-    \"\"\"Geocode a city/region name using Nominatim (OpenStreetMap) to get a bounding box.\"\"\"
+    """Geocode a city/region name using Nominatim (OpenStreetMap) to get a bounding box."""
     url = "https://nominatim.openstreetmap.org/search"
     params = {
         "q": city_query,
@@ -41,12 +40,12 @@ def geocode_city(city_query: str):
     }
 
 def build_overpass_query(niche_words, bbox, limit=50, tags_filter=None):
-    \"\"\"
+    """
     Build an Overpass QL query.
     - niche_words: list of lowercase words to search in the 'name' tag (regex OR).
     - bbox: (south, north, west, east)
     - tags_filter: dict with keys like 'amenity', 'shop', 'office', 'craft', 'healthcare' mapping to lists of values.
-    \"\"\"
+    """
     south, north, west, east = bbox
     name_regex = "|".join([requests.utils.requote_uri(w) for w in niche_words if w])
     # Base selectors: match by name
@@ -81,7 +80,7 @@ def query_overpass(query: str):
     return r.json()
 
 def extract_pois(overpass_json):
-    \"\"\"Extract POIs from Overpass result into a structured list.\"\"\"
+    """Extract POIs from Overpass result into a structured list."""
     elements = overpass_json.get("elements", [])
     rows = []
     for el in elements:
@@ -127,7 +126,7 @@ def extract_pois(overpass_json):
     return rows
 
 def map_niche_to_tags(niche: str):
-    \"\"\"Map common Portuguese niche terms to OSM categories (best effort).\"\"\"
+    """Map common Portuguese niche terms to OSM categories (best effort)."""
     n = niche.lower()
     mapping = {
         "clínica odontológica": {"amenity": ["dentist"], "healthcare": ["dentist"]},
@@ -156,7 +155,7 @@ def map_niche_to_tags(niche: str):
     return None
 
 def dedupe_rows(rows):
-    \"\"\"Deduplicate by (Nome, Endereço) best-effort.\"\"\"
+    """Deduplicate by (Nome, Endereço) best-effort."""
     seen = set()
     out = []
     for r in rows:
@@ -170,7 +169,7 @@ def dedupe_rows(rows):
 
 st.set_page_config(page_title="Gerador de Lista (OSM/Overpass)", page_icon="📊", layout="wide")
 
-st.title("📊 Gerador de Lista de Empresas – Fonte: OpenStreetMap (gratuito)")
+st.title("📊 Gerador de Lista de Empresas — Fonte: OpenStreetMap (gratuito)")
 st.write("Busque empresas por **nicho + região** usando a base pública do OpenStreetMap (Overpass API).")
 
 nicho = st.text_input("Digite o nicho (ex: clínica odontológica, restaurante, loja de pisos):")
@@ -196,7 +195,7 @@ if st.button("Gerar Lista (OSM)"):
     bbox = geo["bbox"]
 
     # Prepare Overpass query
-    niche_words = [w.strip() for w in niche.lower().replace("/", " ").split() if w.strip()]
+    niche_words = [w.strip() for w in nicho.lower().replace("/", " ").split() if w.strip()]
     tags_filter = map_niche_to_tags(nicho)
 
     query = build_overpass_query(niche_words=niche_words, bbox=bbox, limit=int(limite), tags_filter=tags_filter)
@@ -249,4 +248,3 @@ if st.button("Gerar Lista (OSM)"):
 
 st.markdown("---")
 st.caption("Dica: O OpenStreetMap é uma base colaborativa. Nem todas as empresas terão telefone/email/website, mas é um ótimo ponto de partida gratuito. Para resultados mais completos e estáveis, recomendo Google Places API ou serviços como SerpAPI.")
-
