@@ -249,3 +249,4 @@ if st.button("Gerar Lista (OSM)"):
 
 st.markdown("---")
 st.caption("Dica: O OpenStreetMap é uma base colaborativa. Nem todas as empresas terão telefone/email/website, mas é um ótimo ponto de partida gratuito. Para resultados mais completos e estáveis, recomendo Google Places API ou serviços como SerpAPI.")
+
