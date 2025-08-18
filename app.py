@@ -4,137 +4,98 @@ import time
 from bs4 import BeautifulSoup
 import streamlit as st
 
-# 🔑 Sua chave da Google Places API
-GOOGLE_API_KEY = "SUA_GOOGLE_API_KEY_AQUI"
-
 # ===================== FUNÇÕES =====================
 
-def buscar_empresas(nicho, local, limite=10):
+def buscar_empresas_scraping(nicho, local, limite=10):
     """
-    Busca empresas no Google Places API
+    Busca empresas no Google Maps via scraping (resultado do Google Search)
     """
-    url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-    params = {
-        "query": f"{nicho} em {local}",
-        "key": GOOGLE_API_KEY
-    }
+    query = f"{nicho} em {local} site:google.com/maps"
+    url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    response = requests.get(url, headers=headers)
+    soup = BeautifulSoup(response.text, "html.parser")
 
-    response = requests.get(url, params=params)
-    results = response.json().get("results", [])
+    links = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if "google.com/maps/place/" in href and href not in links:
+            links.append(href)
+        if len(links) >= limite:
+            break
 
     empresas = []
-    for r in results[:limite]:
-        place_id = r["place_id"]
+    for link in links:
+        try:
+            page = requests.get(link, headers=headers)
+            sp = BeautifulSoup(page.text, "html.parser")
 
-        # Detalhes do local
-        details_url = "https://maps.googleapis.com/maps/api/place/details/json"
-        details_params = {
-            "place_id": place_id,
-            "fields": "name,formatted_address,formatted_phone_number,website",
-            "key": GOOGLE_API_KEY
-        }
-        details = requests.get(details_url, params=details_params).json().get("result", {})
+            nome = sp.find("h1")
+            nome = nome.text if nome else None
 
-        empresas.append({
-            "Nome": details.get("name"),
-            "Endereço": details.get("formatted_address"),
-            "Telefone": details.get("formatted_phone_number"),
-            "Site": details.get("website")
-        })
+            telefone = None
+            endereco = None
+            site = None
+
+            for span in sp.find_all("span"):
+                txt = span.get_text()
+                if txt and ("(" in txt and ")" in txt and "-" in txt):
+                    telefone = txt
+                elif "R." in txt or "Av." in txt or "Rua" in txt:
+                    endereco = txt
+
+            for a in sp.find_all("a", href=True):
+                if "http" in a["href"] and "google" not in a["href"]:
+                    site = a["href"]
+                    break
+
+            empresas.append({
+                "Nome": nome,
+                "Endereço": endereco,
+                "Telefone": telefone,
+                "Site": site
+            })
+
+            time.sleep(2)  # evitar bloqueio
+        except Exception as e:
+            print(f"⚠️ Erro extraindo {link}: {e}")
 
     return empresas
 
-
-def buscar_dados_cnpj(nome_empresa):
-    """
-    Faz scraping no site cnpj.biz para tentar achar o CNPJ, sócios e email
-    """
-    try:
-        query = nome_empresa.replace(" ", "+")
-        url = f"https://cnpj.biz/{query}"
-        response = requests.get(url, timeout=10)
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        bloco = soup.find("div", {"class": "list-group"})
-        if not bloco:
-            return {"CNPJ": None, "Sócios": [], "Email": None}
-
-        link_empresa = bloco.find("a")["href"]
-        detalhe = requests.get(link_empresa, timeout=10)
-        soup_det = BeautifulSoup(detalhe.text, "html.parser")
-
-        # Extrair CNPJ
-        cnpj = None
-        cnpj_tag = soup_det.find("p", string=lambda t: t and "CNPJ" in t)
-        if cnpj_tag:
-            cnpj = cnpj_tag.text.split(":")[-1].strip()
-
-        # Extrair sócios
-        socios = []
-        socios_tag = soup_det.find_all("li", {"class": "list-group-item"})
-        for s in socios_tag:
-            if "Sócio" in s.text:
-                socios.append(s.text.strip())
-
-        # Extrair email (se existir)
-        email = None
-        for a in soup_det.find_all("a", href=True):
-            if "mailto:" in a["href"]:
-                email = a.text.strip()
-
-        return {"CNPJ": cnpj, "Sócios": socios, "Email": email}
-
-    except Exception:
-        return {"CNPJ": None, "Sócios": [], "Email": None}
-
-
-def enriquecer_empresas(empresas):
-    """
-    Para cada empresa, busca CNPJ e sócios via scraping
-    """
-    dados_finais = []
-    for emp in empresas:
-        dados_cnpj = buscar_dados_cnpj(emp["Nome"])
-        dados_finais.append({
-            **emp,
-            "CNPJ": dados_cnpj.get("CNPJ"),
-            "Email": dados_cnpj.get("Email"),
-            "Sócios": ", ".join(dados_cnpj.get("Sócios", []))
-        })
-        time.sleep(2)  # evitar bloqueio do site
-    return dados_finais
-
 # ===================== INTERFACE STREAMLIT =====================
 
-st.set_page_config(page_title="Gerador de Listas B2B", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Gerador de Listas B2B (Scraping)", page_icon="📊", layout="wide")
 
-st.title("📊 Gerador de Lista de Empresas")
-st.write("Busque empresas por **nicho + região** e exporte para Excel com CNPJ, sócios e contatos.")
+st.title("📊 Gerador de Lista de Empresas (Scraping Google Maps)")
+st.write("Digite **nicho + região** e o app tenta buscar dados direto do Google Maps (sem API).")
 
 nicho = st.text_input("Digite o nicho (ex: clínica odontológica, restaurante, loja de pisos):")
 local = st.text_input("Digite a cidade/região (ex: Belo Horizonte, MG):")
-limite = st.slider("Quantas empresas buscar?", 5, 50, 10)
+limite = st.slider("Quantas empresas buscar?", 5, 20, 5)
 
 if st.button("Gerar Lista"):
     if nicho and local:
         with st.spinner("Buscando empresas..."):
-            empresas = buscar_empresas(nicho, local, limite=limite)
-            dados = enriquecer_empresas(empresas)
+            empresas = buscar_empresas_scraping(nicho, local, limite=limite)
 
-            df = pd.DataFrame(dados)
-            st.success("✅ Busca concluída!")
-            st.dataframe(df)
+            if not empresas:
+                st.error("❌ Nenhum resultado encontrado (Google pode ter bloqueado).")
+            else:
+                df = pd.DataFrame(empresas)
+                st.success("✅ Busca concluída!")
+                st.dataframe(df)
 
-            # Exportar para Excel
-            arquivo = "empresas_com_cnpj.xlsx"
-            df.to_excel(arquivo, index=False)
+                # Exportar para Excel
+                arquivo = "empresas_scraping.xlsx"
+                df.to_excel(arquivo, index=False)
 
-            with open(arquivo, "rb") as f:
-                st.download_button(
-                    label="📥 Baixar Excel",
-                    data=f,
-                    file_name=arquivo,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                with open(arquivo, "rb") as f:
+                    st.download_button(
+                        label="📥 Baixar Excel",
+                        data=f,
+                        file_name=arquivo,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
     else:
         st.warning("⚠️ Digite um nicho e uma cidade para continuar.")
