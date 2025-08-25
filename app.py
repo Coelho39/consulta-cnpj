@@ -169,6 +169,7 @@ def enriquecer_empresas(empresas, incluir_cnpj, incluir_redes_sociais, incluir_e
 # ==================== MÉTODOS DE EXTRAÇÃO (do app.py) ====================
 def google_places_search(query, location, api_key):
     base_url = "https://places.googleapis.com/v1/places:searchText"
+    # ALTERAÇÃO: Aumentado para 20, que é o máximo permitido pela API para este método.
     data = {"textQuery": f"{query} em {location}", "languageCode": "pt-BR", "maxResultCount": 20}
     headers = {"Content-Type": "application/json", "X-Goog-Api-Key": api_key, "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.websiteUri,places.nationalPhoneNumber"}
     results = []
@@ -183,7 +184,8 @@ def google_places_search(query, location, api_key):
         st.error(f"Erro de conexão com Google API: {e}")
     return results
 
-def serpapi_google_maps(query, location, api_key, num_results=50):
+# ALTERAÇÃO: O parâmetro "num_results" agora é passado para a função.
+def serpapi_google_maps(query, location, api_key, num_results):
     url = "https://serpapi.com/search"
     params = {"engine": "google_maps", "q": f"{query} {location}", "hl": "pt", "gl": "br", "api_key": api_key, "num": min(num_results, 100)}
     try:
@@ -217,9 +219,14 @@ def main():
     st.sidebar.header("⚙️ Configurações de Extração")
     method = st.sidebar.selectbox("Método:", ["Google Places API", "SerpAPI Google Maps", "Dados Públicos CNPJ", "Busca Web Simples"])
     
+    # [NOVA SEÇÃO] Configurações de quantidade
+    num_results = 50 # Valor padrão
+    if method == "SerpAPI Google Maps":
+        st.sidebar.header("🔢 Quantidade")
+        num_results = st.sidebar.number_input("Número de resultados a extrair:", min_value=10, max_value=100, value=50, step=10)
+
     st.sidebar.header("🚀 Opções de Enriquecimento")
     st.sidebar.caption("Aplicável a 'Google Places' e 'SerpAPI'")
-    # [NOVO] Checkbox para a busca de e-mails no site
     incluir_emails_site = st.sidebar.checkbox("Buscar E-mails no site oficial", value=True)
     incluir_cnpj = st.sidebar.checkbox("Buscar CNPJ e Sócios", value=True)
     incluir_redes_sociais = st.sidebar.checkbox("Buscar Redes Sociais", value=False)
@@ -231,6 +238,7 @@ def main():
     api_key, cnpj_list = None, []
     if method == "Google Places API":
         api_key = st.text_input("🔑 Google Places API Key:", type="password")
+        st.info("Nota: A Google Places API retorna um máximo de 20 resultados por busca.")
     elif method == "SerpAPI Google Maps":
         api_key = st.text_input("🔑 SerpAPI Key:", type="password")
     elif method == "Dados Públicos CNPJ":
@@ -245,7 +253,8 @@ def main():
                 if api_key and nicho and local: results = google_places_search(nicho, local, api_key)
                 else: st.error("Preencha Nicho, Localização e API Key.")
             elif method == "SerpAPI Google Maps":
-                if api_key and nicho and local: results = serpapi_google_maps(nicho, local, api_key)
+                # ALTERAÇÃO: Passando o número de resultados selecionado pelo usuário
+                if api_key and nicho and local: results = serpapi_google_maps(nicho, local, api_key, num_results)
                 else: st.error("Preencha Nicho, Localização e API Key.")
             elif method == "Dados Públicos CNPJ":
                 if cnpj_list: results = search_cnpj_data(cnpj_list)
@@ -255,7 +264,6 @@ def main():
 
         if results and is_enrichable and (incluir_cnpj or incluir_redes_sociais or incluir_emails_site):
             st.info(f"Extração inicial concluída com {len(results)} resultados. Iniciando enriquecimento...")
-            # [NOVO] Passando o novo parâmetro para a função de enriquecimento
             results = enriquecer_empresas(results, incluir_cnpj, incluir_redes_sociais, incluir_emails_site)
         
         if results:
