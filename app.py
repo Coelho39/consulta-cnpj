@@ -1,4 +1,4 @@
-# app_modern_ui.py
+# app_v4_polished.py
 import requests
 import pandas as pd
 import streamlit as st
@@ -6,42 +6,18 @@ import json
 from bs4 import BeautifulSoup
 import time
 import re
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import urljoin
 import random
 from fake_useragent import UserAgent
 import io
 
-# ==================== ESTILO CSS CUSTOMIZADO ====================
+# ==================== ESTILO CSS CUSTOMIZADO (Refinado) ====================
 def load_custom_css():
     """Injeta CSS customizado para modernizar a aparência do app."""
     st.markdown("""
         <style>
             /* Cor de fundo principal */
-            .main {
-                background-color: #0E1117;
-            }
-            
-            /* Estilo para os contêineres de input */
-            [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="stVerticalBlock"] {
-                border: 1px solid #2D3039;
-                background-color: #161A21;
-                border-radius: 10px;
-                padding: 20px;
-                margin-bottom: 20px;
-            }
-
-            /* Estilo dos botões */
-            .stButton>button {
-                border-radius: 8px;
-                border: 1px solid #3B82F6; /* Azul do botão */
-                color: #FFFFFF;
-                background-color: #3B82F6;
-            }
-            .stButton>button:hover {
-                background-color: #2563EB;
-                border-color: #2563EB;
-                color: #FFFFFF;
-            }
+            .main { background-color: #0E1117; }
             
             /* Estilo da sidebar */
             [data-testid="stSidebar"] {
@@ -49,24 +25,28 @@ def load_custom_css():
                 border-right: 1px solid #2D3039;
             }
             
-            /* Títulos na sidebar */
-            [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
-                color: #FAFAFA;
+            /* Títulos */
+            h1, h2, h3 { color: #FAFAFA; }
+
+            /* Estilo para abas (tabs) */
+            [data-testid="stTabs"] button {
+                color: #A1A1AA;
+                border-radius: 8px;
+            }
+            [data-testid="stTabs"] button[aria-selected="true"] {
+                background-color: #27272A;
+                color: #FFFFFF;
             }
             
-            /* Fonte geral */
-            html, body, [class*="st-"] {
-                font-family: 'Inter', 'Source Sans Pro', sans-serif;
-            }
-            
-            /* Oculta o menu principal do Streamlit e o footer */
+            /* Oculta o menu e footer do Streamlit */
             #MainMenu {visibility: hidden;}
             footer {visibility: hidden;}
             header {visibility: hidden;}
         </style>
     """, unsafe_allow_html=True)
 
-# ==================== FUNÇÕES DE ENRIQUECIMENTO (Sem alterações) ====================
+# ==================== FUNÇÕES CORE (Sem alterações) ====================
+# (Todas as suas funções de busca e enriquecimento permanecem aqui, sem mudanças)
 def buscar_emails_site(website, timeout=10):
     if not website or not isinstance(website, str) or not website.startswith("http"): return []
     emails_encontrados = set()
@@ -163,7 +143,6 @@ def enriquecer_empresas(empresas, incluir_cnpj, incluir_redes_sociais, incluir_e
     progress_bar.empty()
     return dados_finais
 
-# ==================== MÉTODOS DE EXTRAÇÃO (Sem alterações) ====================
 def google_places_search(query, location, api_key):
     base_url = "https://places.googleapis.com/v1/places:searchText"
     data = {"textQuery": f"{query} em {location}", "languageCode": "pt-BR", "maxResultCount": 20}
@@ -202,86 +181,93 @@ def simple_web_search(query, location):
     st.info("O método 'Busca Web Simples' é apenas demonstrativo e não extrairá dados.")
     return []
 
-# ==================== INTERFACE STREAMLIT (Reestruturada) ====================
+# ==================== INTERFACE STREAMLIT V4 (Com Abas) ====================
 def main():
     st.set_page_config(page_title="Prospector Pro", page_icon="✨", layout="wide")
     load_custom_css()
 
-    # --- SIDEBAR ---
     with st.sidebar:
         st.markdown("## ✨ Prospector Pro")
         st.markdown("---")
-        
-        st.markdown("### ⚙️ Configurações de Extração")
-        method = st.selectbox("Método:", ["Google Places API", "SerpAPI Google Maps", "Dados Públicos CNPJ", "Busca Web Simples"], label_visibility="collapsed")
-        
         st.markdown("### 🚀 Opções de Enriquecimento")
-        st.caption("Aplicável a 'Google Places' e 'SerpAPI'")
-        incluir_emails_site = st.checkbox("Buscar E-mails no site oficial", value=True)
+        st.caption("Aplicável a buscas por Nicho/Local")
+        incluir_emails_site = st.checkbox("Buscar E-mails no site", value=True)
         incluir_cnpj = st.checkbox("Buscar CNPJ e Sócios", value=True)
         incluir_redes_sociais = st.checkbox("Buscar Redes Sociais", value=False)
         st.markdown("---")
 
-    # --- PÁGINA PRINCIPAL ---
-    st.header("Painel de Prospecção")
-    st.markdown("Preencha os campos abaixo para iniciar a extração de dados de empresas.")
+    st.title("🏢 Painel de Prospecção")
+    st.markdown("Selecione o método de extração e preencha os campos para iniciar.")
 
-    api_key, cnpj_list = None, []
+    # --- NOVO: USO DE ABAS PARA ORGANIZAR OS MÉTODOS ---
+    tab1, tab2, tab3 = st.tabs(["🔎 Por Nicho e Local", "📋 Por Lista de CNPJs", "🌐 Busca Web Simples"])
 
-    # Container para os inputs
-    with st.container():
-        col1, col2 = st.columns(2)
-        with col1: 
-            nicho = st.text_input("🎯 Nicho da empresa:", placeholder="ex: dentista, restaurante")
-            if method == "Google Places API":
-                api_key = st.text_input("🔑 Google Places API Key:", type="password")
-            elif method == "SerpAPI Google Maps":
-                api_key = st.text_input("🔑 SerpAPI Key:", type="password")
-        with col2: 
-            local = st.text_input("📍 Localização:", placeholder="ex: Belo Horizonte, MG")
+    results = []
+    
+    with tab1:
+        st.subheader("Extrair usando Google Places ou SerpAPI")
+        method_nicho = st.selectbox("Selecione a API:", ["Google Places API", "SerpAPI Google Maps"])
         
-        if method == "Dados Públicos CNPJ":
-            cnpj_text = st.text_area("📋 Lista de CNPJs (um por linha):", height=150)
-            if cnpj_text: cnpj_list = [cnpj.strip() for cnpj in cnpj_text.split('\n') if cnpj.strip()]
+        with st.container(border=True):
+            nicho = st.text_input("🎯 Nicho da empresa:", placeholder="ex: dentista, restaurante")
+            local = st.text_input("📍 Localização:", placeholder="ex: Belo Horizonte, MG")
+            api_key = st.text_input(f"🔑 Chave da API ({method_nicho}):", type="password")
+        
+        if st.button("🚀 Extrair por Nicho", type="primary", use_container_width=True):
+            is_enrichable = True
+            with st.spinner("Iniciando extração por nicho..."):
+                if method_nicho == "Google Places API":
+                    if api_key and nicho and local: results = google_places_search(nicho, local, api_key)
+                    else: st.error("Preencha Nicho, Localização e Chave da API.")
+                elif method_nicho == "SerpAPI Google Maps":
+                    if api_key and nicho and local: results = serpapi_google_maps(nicho, local, api_key)
+                    else: st.error("Preencha Nicho, Localização e Chave da API.")
+    
+    with tab2:
+        st.subheader("Enriquecer uma lista de CNPJs")
+        with st.container(border=True):
+            cnpj_text = st.text_area("📋 Cole os CNPJs aqui (um por linha):", height=200)
+            cnpj_list = [cnpj.strip() for cnpj in cnpj_text.split('\n') if cnpj.strip()] if cnpj_text else []
+        
+        if st.button("🚀 Buscar por CNPJ", type="primary", use_container_width=True):
+            is_enrichable = False # Enriquecimento já é o próprio processo
+            if cnpj_list:
+                with st.spinner("Buscando dados dos CNPJs..."):
+                    results = search_cnpj_data(cnpj_list)
+            else:
+                st.error("Insira pelo menos um CNPJ na lista.")
 
-    if st.button("🚀 Extrair Dados", type="primary", use_container_width=True):
-        # Lógica de extração e apresentação de resultados (sem alterações)
-        results = []
-        is_enrichable = method in ["Google Places API", "SerpAPI Google Maps"]
-        with st.spinner("Iniciando extração..."):
-            if method == "Google Places API":
-                if api_key and nicho and local: results = google_places_search(nicho, local, api_key)
-                else: st.error("Preencha Nicho, Localização e API Key.")
-            elif method == "SerpAPI Google Maps":
-                if api_key and nicho and local: results = serpapi_google_maps(nicho, local, api_key)
-                else: st.error("Preencha Nicho, Localização e API Key.")
-            elif method == "Dados Públicos CNPJ":
-                if cnpj_list: results = search_cnpj_data(cnpj_list)
-                else: st.error("Insira pelo menos um CNPJ.")
-            elif method == "Busca Web Simples":
-                results = simple_web_search(nicho, local)
+    with tab3:
+        st.subheader("Busca Web (Demonstração)")
+        st.info("Este método é apenas uma demonstração e não extrairá dados reais.")
+        is_enrichable = False
+        # A função simple_web_search já exibe um st.info e retorna lista vazia.
 
-        if results and is_enrichable and (incluir_cnpj or incluir_redes_sociais or incluir_emails_site):
+    # --- PROCESSAMENTO E EXIBIÇÃO DE RESULTADOS (Lógica Unificada) ---
+    if results:
+        if is_enrichable and (incluir_cnpj or incluir_redes_sociais or incluir_emails_site):
             st.info(f"Extração inicial concluída com {len(results)} resultados. Iniciando enriquecimento...")
             results = enriquecer_empresas(results, incluir_cnpj, incluir_redes_sociais, incluir_emails_site)
         
-        if results:
-            df = pd.DataFrame(results).drop_duplicates(subset=['Nome'], keep='first').fillna('N/A')
-            st.success(f"✅ **{len(df)} empresas encontradas!**")
-            st.dataframe(df)
+        df = pd.DataFrame(results).drop_duplicates(subset=['Nome'], keep='first').fillna('N/A')
+        st.success(f"✅ **{len(df)} empresas encontradas!**")
+        st.dataframe(df)
 
-            @st.cache_data
-            def to_excel(df_to_convert):
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df_to_convert.to_excel(writer, index=False, sheet_name='Empresas')
-                return output.getvalue()
-            
-            dl_col1, dl_col2 = st.columns(2)
-            dl_col1.download_button("📥 Download CSV", df.to_csv(index=False, encoding='utf-8-sig'), f"empresas.csv", "text/csv", use_container_width=True)
-            dl_col2.download_button("📊 Download Excel", to_excel(df), f"empresas.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-        else:
-            st.warning("⚠️ Nenhum resultado encontrado.")
+        @st.cache_data
+        def to_excel(df_to_convert):
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df_to_convert.to_excel(writer, index=False, sheet_name='Empresas')
+            return output.getvalue()
+        
+        dl_col1, dl_col2 = st.columns(2)
+        dl_col1.download_button("📥 Download CSV", df.to_csv(index=False, encoding='utf-8-sig'), f"empresas.csv", "text/csv", use_container_width=True)
+        dl_col2.download_button("📊 Download Excel", to_excel(df), f"empresas.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+    
+    # Exibe aviso se um botão foi clicado mas nenhum resultado foi encontrado
+    elif "button" in st.session_state and st.session_state.button:
+        st.warning("⚠️ Nenhum resultado encontrado para os critérios fornecidos.")
+
 
 if __name__ == "__main__":
     main()
