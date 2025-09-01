@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup
 # Utilidades
 # ==============================================
 
-APP_TITLE = "🏢 Prospectador B2B – Prospecção Ativa (v7.1)"
+APP_TITLE = "🏢 Prospectador B2B – Prospecção Ativa (v7.2)"
 
 UF_NOMES = {
     "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas",
@@ -112,10 +112,12 @@ def buscar_emails_site(website: str, timeout: int = 12) -> list[str]:
 
 @st.cache_data(ttl=60 * 60)
 def encontrar_cnaes_por_descricao(descricao: str) -> list[dict]:
+    """Encontra todos os CNAEs que correspondem a uma descrição de atividade."""
     if not descricao:
         return []
     
-    url = "https://brasilapi.com.br/api/cnpj/v1/cnaes"
+    # CORREÇÃO: URL ajustada para o endpoint correto da API de CNAEs.
+    url = "https://brasilapi.com.br/api/cnaes/v1"
     r = http_get(url)
     if not r:
         st.error("Não foi possível acessar a lista de CNAEs da BrasilAPI.")
@@ -137,6 +139,7 @@ def encontrar_cnaes_por_descricao(descricao: str) -> list[dict]:
 
 @st.cache_data(ttl=60 * 10)
 def raspar_cnpjs_por_cnae(cnae_code: str, uf: str, max_por_cnae: int) -> list[dict]:
+    """Faz web scraping no site cnpj.biz para encontrar empresas por CNAE e UF."""
     cnae_limpo = re.sub(r'\D', '', cnae_code)
     url = f"https://cnpj.biz/cnae/{cnae_limpo}/uf/{uf.lower()}"
     
@@ -147,6 +150,7 @@ def raspar_cnpjs_por_cnae(cnae_code: str, uf: str, max_por_cnae: int) -> list[di
     try:
         soup = BeautifulSoup(r.text, "html.parser")
         empresas = []
+        # O seletor abaixo pode precisar de ajuste se o site mudar
         cards = soup.select("div.row > div[style*='padding: 20px']")
         
         for card in cards:
@@ -176,7 +180,6 @@ def raspar_cnpjs_por_cnae(cnae_code: str, uf: str, max_por_cnae: int) -> list[di
 
 def main():
     st.set_page_config(page_title=APP_TITLE, page_icon="🏢", layout="wide")
-    # CORREÇÃO: A variável aqui deve ser maiúscula para corresponder à sua definição.
     st.title(APP_TITLE)
     st.markdown("Uma ferramenta para descobrir e enriquecer contatos de empresas (B2B).")
 
@@ -224,7 +227,7 @@ def main():
                 with st.spinner(f"Buscando empresas para o CNAE {cnae_cod}..."):
                     registros_cnae = raspar_cnpjs_por_cnae(cnae_cod, uf, max_empresas_por_cnae)
                     todos_registros.extend(registros_cnae)
-                    time.sleep(random.uniform(1, 2))
+                    time.sleep(random.uniform(1, 2)) # Pausa para não sobrecarregar o site
 
             pb.empty()
 
@@ -240,6 +243,7 @@ def main():
                 pb_enriquecimento.progress((i + 1) / len(todos_registros), f"Enriquecendo {reg.get('Nome')[:40]}...")
                 dados_ricos = buscar_dados_receita_federal(reg.get("CNPJ"))
                 if dados_ricos:
+                    # Tenta buscar emails usando o nome da empresa se não houver site
                     website_slug = slug(dados_ricos.get('Nome Fantasia') or dados_ricos.get('Nome'))
                     emails = buscar_emails_site(f"http://www.{website_slug}.com.br")
                     dados_ricos["Emails do Site"] = ", ".join(emails) if emails else None
@@ -267,5 +271,6 @@ def main():
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
+# O ponto de entrada do script
 if __name__ == "__main__":
     main()
