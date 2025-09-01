@@ -1,288 +1,486 @@
+import os
+import io
+import re
+import time
+import json
+import random
+import unicodedata
+from urllib.parse import urljoin
+
 import requests
 import pandas as pd
 import streamlit as st
-import json
 from bs4 import BeautifulSoup
-import time
-import re
-from urllib.parse import quote_plus, urljoin
-import random
-from fake_useragent import UserAgent
-import io
 
-# ==================== FUNÇÕES DE ENRIQUECIMENTO ====================
+# ==============================================
+# Utilidades
+# ==============================================
 
-# [NOVO] Função aprimorada para buscar e-mails, vinda do appv2.py
-def buscar_emails_site(website, timeout=10):
-    """
-    Busca e-mails diretamente no site oficial da empresa, de forma mais assertiva.
-    """
-    if not website or not isinstance(website, str) or not website.startswith("http"):
-        return []
-    
-    emails_encontrados = set()
+APP_TITLE = "🏢 Prospectador B2B – Extração e Enriquecimento (v4)"
+
+UF_NOMES = {
+    "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas",
+    "BA": "Bahia", "CE": "Ceará", "DF": "Distrito Federal", "ES": "Espírito Santo",
+    "GO": "Goiás", "MA": "Maranhão", "MT": "Mato Grosso", "MS": "Mato Grosso do Sul",
+    "MG": "Minas Gerais", "PA": "Pará", "PB": "Paraíba", "PR": "Paraná",
+    "PE": "Pernambuco", "PI": "Piauí", "RJ": "Rio de Janeiro", "RN": "Rio Grande do Norte",
+    "RS": "Rio Grande do Sul", "RO": "Rondônia", "RR": "Roraima", "SC": "Santa Catarina",
+    "SP": "São Paulo", "SE": "Sergipe", "TO": "Tocantins"
+}
+
+# DDDs do Pará (para sinais adicionais na validação do telefone)
+DDD_PA = {"91", "93", "94"}
+
+# Resiliência para user-agent sem dependência externa
+DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+def slug(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
+
+
+def limpa_cnpj(cnpj: str) -> str:
+    return re.sub(r"\D", "", cnpj or "")
+
+
+def normaliza_tel(t: str) -> str:
+    if not t:
+        return ""
+    t = re.sub(r"[^0-9]", "", t)
+    if t.startswith("55") and len(t) >= 12:
+        t = t[2:]
+    return t
+
+
+@st.cache_data(ttl=60 * 30)
+def http_get(url: str, timeout: int = 15, headers: dict | None = None) -> requests.Response | None:
     try:
-        ua = UserAgent()
-        headers = {"User-Agent": ua.random}
-        response = requests.get(website, headers=headers, timeout=timeout)
-        response.raise_for_status()
-        
-        # Procura padrões de e-mail no corpo HTML
-        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-        found_emails = re.findall(email_pattern, response.text)
-        for email in found_emails:
-            # Filtra e-mails comuns de imagens ou exemplos
-            if not email.endswith(('.png', '.jpg', '.jpeg', '.gif', '.svg')):
-                emails_encontrados.add(email.lower())
-
-        # Procura em links "mailto:"
-        soup = BeautifulSoup(response.text, "html.parser")
-        for a in soup.find_all("a", href=True):
-            if a["href"].startswith("mailto:"):
-                email = a["href"].replace("mailto:", "").strip().lower()
-                if email:
-                    emails_encontrados.add(email)
-
-    except (requests.RequestException, ConnectionError, TimeoutError):
-        # Ignora erros de conexão ou de leitura do site
-        return []
-        
-    return list(emails_encontrados)
-
-
-def buscar_dados_cnpj_biz(nome_empresa, timeout=15):
-    """
-    Faz scraping no site cnpj.biz para tentar achar o CNPJ, sócios e email. (Versão robusta do app.py)
-    """
-    try:
-        ua = UserAgent()
-        headers = {'User-Agent': ua.random}
-        query = re.sub(r'[^\w\s]', ' ', nome_empresa).strip()
-        query = re.sub(r'\s+', '+', query)
-        url = f"https://cnpj.biz/search/{query}"
-        response = requests.get(url, headers=headers, timeout=timeout)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        empresa_links = [urljoin("https://cnpj.biz", link["href"]) for link in soup.find_all("a", href=True) if "/cnpj/" in link["href"]]
-        if not empresa_links:
-            return {"CNPJ": None, "Sócios": [], "Email_CNPJ": None}
-
-        detalhe_response = requests.get(empresa_links[0], headers=headers, timeout=timeout)
-        detalhe_response.raise_for_status()
-        page_text = BeautifulSoup(detalhe_response.text, "html.parser").get_text()
-
-        cnpj = next(iter(re.findall(r'(\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2})', page_text)), None)
-        socios = list(set(m.strip() for p in [r'Sócio[:\s]*([^\n\r]+)', r'Administrador[:\s]*([^\n\r]+)'] for m in re.findall(p, page_text, re.IGNORECASE) if m.strip() and len(m.strip()) > 3))
-        email = next(iter(re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', page_text)), None)
-        
-        return {"CNPJ": cnpj, "Sócios": socios, "Email_CNPJ": email}
+        h = {"User-Agent": DEFAULT_UA}
+        if headers:
+            h.update(headers)
+        r = requests.get(url, headers=h, timeout=timeout)
+        r.raise_for_status()
+        return r
     except Exception:
-        return {"CNPJ": None, "Sócios": [], "Email_CNPJ": None}
+        return None
 
 
-def buscar_dados_receita_federal(cnpj):
+# ==============================================
+# Enriquecimento (baixo custo): BrasilAPI / publica.cnpj.ws / ReceitaWS
+# ==============================================
+
+@st.cache_data(ttl=60 * 60)
+def buscar_dados_receita_federal(cnpj: str) -> dict:
+    """Consulta em 3 fontes públicas; retorna o primeiro sucesso.
+    Mantido simples para manter custo zero.
     """
-    Busca dados em APIs públicas da Receita Federal. (Versão completa do app.py)
-    """
-    if not cnpj: return {}
-    cnpj_limpo = re.sub(r'\D', '', cnpj)
-    if len(cnpj_limpo) != 14: return {}
-    
-    apis = [f"https://www.receitaws.com.br/v1/cnpj/{cnpj_limpo}", f"https://publica.cnpj.ws/cnpj/{cnpj_limpo}", f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"]
-    for api_url in apis:
+    c = limpa_cnpj(cnpj)
+    if len(c) != 14:
+        return {}
+
+    fontes = [
+        f"https://brasilapi.com.br/api/cnpj/v1/{c}",
+        f"https://publica.cnpj.ws/cnpj/{c}",
+        f"https://www.receitaws.com.br/v1/cnpj/{c}",
+    ]
+    for url in fontes:
+        r = http_get(url, timeout=20)
+        if not r:
+            continue
         try:
-            response = requests.get(api_url, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if 'status' in data and data.get('status') == 'OK':
-                    return {'Nome_Receita': data.get('nome'), 'Fantasia': data.get('fantasia'), 'CNPJ_Receita': data.get('cnpj'), 'Situacao_Receita': data.get('situacao')}
-                elif 'razao_social' in data:
-                    return {'Nome_Receita': data.get('razao_social'), 'Fantasia': data.get('nome_fantasia'), 'CNPJ_Receita': data.get('cnpj'), 'Situacao_Receita': data.get('descricao_situacao_cadastral')}
-            time.sleep(1)
+            data = r.json()
         except Exception:
             continue
+
+        # Normalização multi-fonte
+        if "razao_social" in data or "nome_fantasia" in data:
+            return {
+                "Razao Social (Receita)": data.get("razao_social") or data.get("nome"),
+                "Nome Fantasia": data.get("nome_fantasia") or data.get("fantasia"),
+                "CNPJ (Receita)": data.get("cnpj"),
+                "Situação Cadastral": data.get("descricao_situacao_cadastral") or data.get("situacao"),
+                "CNAE Principal": (data.get("cnae_fiscal") or data.get("cnae_principal", {})).get("codigo")
+                if isinstance(data.get("cnae_principal"), dict)
+                else data.get("cnae_fiscal"),
+            }
+        if data.get("status") == "OK":
+            return {
+                "Razao Social (Receita)": data.get("nome"),
+                "Nome Fantasia": data.get("fantasia"),
+                "CNPJ (Receita)": data.get("cnpj"),
+                "Situação Cadastral": data.get("situacao"),
+                "CNAE Principal": data.get("atividade_principal", [{}])[0].get("code"),
+            }
     return {}
 
 
-def buscar_redes_sociais(website):
-    """
-    Tenta encontrar redes sociais no website da empresa. (Versão do app.py)
-    """
-    redes = {'Facebook': None, 'Instagram': None, 'LinkedIn': None}
-    if not website or not isinstance(website, str) or not website.startswith('http'): return redes
+@st.cache_data(ttl=60 * 60)
+def buscar_emails_site(website: str, timeout: int = 12) -> list[str]:
+    if not website or not isinstance(website, str) or not website.startswith("http"):
+        return []
+    r = http_get(website, timeout=timeout)
+    if not r:
+        return []
+
+    emails = set()
+    email_pattern = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+    emails.update(e.lower() for e in email_pattern.findall(r.text))
+
     try:
-        ua = UserAgent()
-        response = requests.get(website, headers={'User-Agent': ua.random}, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        for a in soup.find_all('a', href=True):
-            href = a['href'].lower()
-            if not redes['Facebook'] and 'facebook.com' in href: redes['Facebook'] = a['href']
-            elif not redes['Instagram'] and 'instagram.com' in href: redes['Instagram'] = a['href']
-            elif not redes['LinkedIn'] and 'linkedin.com' in href: redes['LinkedIn'] = a['href']
+        soup = BeautifulSoup(r.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            if href.startswith("mailto:"):
+                emails.add(href.replace("mailto:", "").lower())
+    except Exception:
+        pass
+
+    return sorted({e for e in emails if not re.search(r"\.(png|jpg|jpeg|gif|svg)$", e)})
+
+
+@st.cache_data(ttl=60 * 60)
+def buscar_redes_sociais(website: str) -> dict:
+    redes = {"Facebook": None, "Instagram": None, "LinkedIn": None}
+    if not website or not website.startswith("http"):
+        return redes
+    r = http_get(website, timeout=12)
+    if not r:
+        return redes
+    try:
+        soup = BeautifulSoup(r.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"].lower()
+            if not redes["Facebook"] and "facebook.com" in href:
+                redes["Facebook"] = a["href"]
+            elif not redes["Instagram"] and "instagram.com" in href:
+                redes["Instagram"] = a["href"]
+            elif not redes["LinkedIn"] and "linkedin.com" in href:
+                redes["LinkedIn"] = a["href"]
     except Exception:
         pass
     return redes
 
 
-def enriquecer_empresas(empresas, incluir_cnpj, incluir_redes_sociais, incluir_emails_site):
-    """
-    [V3] Orquestra o enriquecimento, combinando as melhores funções dos dois apps.
-    """
-    dados_finais = []
-    total = len(empresas)
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    for i, emp in enumerate(empresas):
-        nome_empresa = emp.get('Nome', '')
-        website = emp.get('Website')
-        status_text.text(f"Enriquecendo: {nome_empresa} ({i+1}/{total})")
-        dados_empresa = {**emp}
-        
-        if incluir_emails_site and website:
-            emails_site = buscar_emails_site(website)
-            dados_empresa["Emails_do_Site"] = ", ".join(emails_site) if emails_site else "N/A"
-        
-        if incluir_cnpj and nome_empresa:
-            dados_cnpj_biz = buscar_dados_cnpj_biz(nome_empresa)
-            dados_empresa.update({
-                "CNPJ_Scraped": dados_cnpj_biz.get("CNPJ"), 
-                "Email_CNPJ": dados_cnpj_biz.get("Email_CNPJ"),
-                "Sócios": ", ".join(dados_cnpj_biz.get("Sócios", [])),
-            })
-            if dados_cnpj_biz.get("CNPJ"):
-                dados_receita = buscar_dados_receita_federal(dados_cnpj_biz["CNPJ"])
-                dados_empresa.update(dados_receita)
-        
-        if incluir_redes_sociais and website:
-            dados_empresa.update(buscar_redes_sociais(website))
-        
-        dados_finais.append(dados_empresa)
-        progress_bar.progress((i + 1) / total)
-        time.sleep(random.uniform(1, 2))
-    
-    progress_bar.empty(); status_text.empty()
-    return dados_finais
+# ==============================================
+# Métodos de EXTRAÇÃO
+# ==============================================
 
-
-# ==================== MÉTODOS DE EXTRAÇÃO (do app.py) ====================
-def google_places_search(query, location, api_key):
-    base_url = "https://places.googleapis.com/v1/places:searchText"
-    # ALTERAÇÃO: Aumentado para 20, que é o máximo permitido pela API para este método.
-    data = {"textQuery": f"{query} em {location}", "languageCode": "pt-BR", "maxResultCount": 20}
-    headers = {"Content-Type": "application/json", "X-Goog-Api-Key": api_key, "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.websiteUri,places.nationalPhoneNumber"}
-    results = []
-    try:
-        response = requests.post(base_url, json=data, headers=headers, timeout=30)
-        if response.status_code != 200:
-            st.error(f"Erro na API do Google: {response.status_code} - {response.text}")
-            return []
-        for place in response.json().get('places', []):
-            results.append({'Nome': place.get('displayName', {}).get('text'), 'Endereço': place.get('formattedAddress'), 'Telefone': place.get('nationalPhoneNumber'), 'Website': place.get('websiteUri'), 'Rating': place.get('rating'), 'Avaliações': place.get('userRatingCount')})
-    except requests.exceptions.RequestException as e:
-        st.error(f"Erro de conexão com Google API: {e}")
-    return results
-
-# ALTERAÇÃO: O parâmetro "num_results" agora é passado para a função.
-def serpapi_google_maps(query, location, api_key, num_results):
+@st.cache_data(ttl=60 * 10)
+def serpapi_google_maps(query: str, location: str, api_key: str, num_results: int = 50) -> list[dict]:
+    """Usa SerpAPI (pago/free)."""
+    if not api_key:
+        return []
     url = "https://serpapi.com/search"
-    params = {"engine": "google_maps", "q": f"{query} {location}", "hl": "pt", "gl": "br", "api_key": api_key, "num": min(num_results, 100)}
+    params = {
+        "engine": "google_maps",
+        "q": f"{query} {location}",
+        "hl": "pt",
+        "gl": "br",
+        "api_key": api_key,
+        "num": min(int(num_results), 100),
+    }
     try:
-        response = requests.get(url, params=params, timeout=30)
-        data = response.json()
-        if 'error' in data:
-            st.error(f"Erro SerpAPI: {data['error']}"); return []
-        return [{'Nome': p.get('title'), 'Endereço': p.get('address'), 'Telefone': p.get('phone'), 'Website': p.get('website'), 'Rating': p.get('rating'), 'Avaliações': p.get('reviews')} for p in data.get("local_results", [])]
-    except requests.exceptions.RequestException as e:
-        st.error(f"Erro de conexão com SerpAPI: {e}"); return []
+        r = requests.get(url, params=params, timeout=30)
+        data = r.json()
+        if "error" in data:
+            st.error(f"Erro SerpAPI: {data['error']}")
+            return []
+        out = []
+        for p in data.get("local_results", []) or []:
+            out.append(
+                {
+                    "Nome": p.get("title"),
+                    "Endereço": p.get("address"),
+                    "Telefone": p.get("phone"),
+                    "Website": p.get("website"),
+                    "Rating": p.get("rating"),
+                    "Avaliações": p.get("reviews"),
+                    "Origem": "SerpAPI",
+                }
+            )
+        return out
+    except Exception as e:
+        st.error(f"Erro de conexão com SerpAPI: {e}")
+        return []
 
-def search_cnpj_data(cnpj_list):
+
+@st.cache_data(ttl=60 * 30)
+def cnpj_biz_busca_empresas(termo: str, uf: str | None = None, max_empresas: int = 40) -> list[dict]:
+    """Busca de baixo custo no cnpj.biz (raspagem leve) para retornar empresas relacionadas.
+    Observação: site de terceiros; se o layout mudar, ajustar o parser.
+    """
+    if not termo:
+        return []
+
+    query = re.sub(r"[^\w\s]", " ", termo).strip()
+    query = re.sub(r"\s+", "+", query)
+    url = f"https://cnpj.biz/search/{query}"
+    r = http_get(url, timeout=20)
+    if not r:
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    links = [
+        urljoin("https://cnpj.biz", a["href"]) for a in soup.find_all("a", href=True) if "/cnpj/" in a["href"]
+    ]
     results = []
-    progress_bar = st.progress(0)
-    for i, cnpj in enumerate(cnpj_list):
-        dados = buscar_dados_receita_federal(cnpj)
-        if dados:
-            results.append({'Nome': dados.get('Nome_Receita'), 'CNPJ': dados.get('CNPJ_Receita'), 'Situação': dados.get('Situacao_Receita')})
-        progress_bar.progress((i + 1) / len(cnpj_list))
+    for link in links[: max_empresas * 2]:  # leitura conservadora
+        rr = http_get(link, timeout=20)
+        if not rr:
+            continue
+        page = BeautifulSoup(rr.text, "html.parser").get_text("\n")
+        # Extrações simples
+        cnpj_match = re.search(r"(\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2})", page)
+        nome_match = re.search(r"Nome\s*Fantasia\s*\n\s*(.+)\n|\bNome\s*Empresarial\s*\n\s*(.+)\n", page)
+        endereco_match = re.search(r"Endere[çc]o\s*\n\s*(.+)\n", page)
+        tel_match = re.search(r"Telefone\s*\n\s*([0-9\(\)\-\s]+)\n", page)
+        email_match = re.search(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", page)
+
+        nome = None
+        if nome_match:
+            nome = (nome_match.group(1) or nome_match.group(2) or "").strip()
+
+        cnpj = cnpj_match.group(1) if cnpj_match else None
+        endereco = endereco_match.group(1).strip() if endereco_match else None
+        telefone = normaliza_tel(tel_match.group(1)) if tel_match else None
+        email = email_match.group(0).lower() if email_match else None
+
+        # Filtro por UF, se solicitado
+        if uf:
+            uf_ok = (uf in (endereco or "")) or (UF_NOMES.get(uf, "") in (endereco or ""))
+            if not uf_ok:
+                continue
+
+        if cnpj or nome:
+            results.append(
+                {
+                    "Nome": nome or "(sem nome)",
+                    "CNPJ": cnpj,
+                    "Endereço": endereco,
+                    "Telefone": telefone,
+                    "Email": email,
+                    "Website": None,
+                    "Origem": "cnpj.biz",
+                }
+            )
+        if len(results) >= max_empresas:
+            break
+        time.sleep(random.uniform(0.6, 1.2))  # gentileza
     return results
 
-def simple_web_search(query, location):
-    st.info("O método 'Busca Web Simples' é apenas demonstrativo e não extrairá dados.")
-    return []
 
-# ==================== INTERFACE STREAMLIT (do app.py, com novas opções) ====================
+# ==============================================
+# Orquestração de ENRIQUECIMENTO
+# ==============================================
+
+def enriquecer_empresas(empresas: list[dict], *, buscar_cnpj_receita: bool, buscar_redes: bool, buscar_emails: bool) -> list[dict]:
+    out = []
+    total = len(empresas)
+    pb = st.progress(0.0)
+    msg = st.empty()
+
+    for i, emp in enumerate(empresas, start=1):
+        msg.write(f"Enriquecendo: {emp.get('Nome') or emp.get('CNPJ') or 'registro'} ({i}/{total})")
+        row = dict(emp)
+
+        # Email do site
+        if buscar_emails and emp.get("Website"):
+            emails = buscar_emails_site(emp["Website"]) or []
+            row["Emails do Site"] = ", ".join(emails) if emails else None
+
+        # Redes sociais
+        if buscar_redes and emp.get("Website"):
+            row.update(buscar_redes_sociais(emp["Website"]))
+
+        # Receita/CNAE/Situação
+        base_cnpj = emp.get("CNPJ") or emp.get("CNPJ (Receita)")
+        if buscar_cnpj_receita and base_cnpj:
+            dados = buscar_dados_receita_federal(base_cnpj)
+            for k, v in dados.items():
+                if v and not row.get(k):
+                    row[k] = v
+
+        out.append(row)
+        pb.progress(i / total)
+        time.sleep(random.uniform(0.1, 0.25))
+
+    pb.empty(); msg.empty()
+    return out
+
+
+# ==============================================
+# Interface Streamlit
+# ==============================================
+
 def main():
-    st.set_page_config(page_title="Extração de Empresas", page_icon="🏢", layout="wide")
-    st.title("🏢 Extração e Enriquecimento de Dados de Empresas (V3)")
-    
-    st.sidebar.header("⚙️ Configurações de Extração")
-    method = st.sidebar.selectbox("Método:", ["Google Places API", "SerpAPI Google Maps", "Dados Públicos CNPJ", "Busca Web Simples"])
-    
-    # [NOVA SEÇÃO] Configurações de quantidade
-    num_results = 50 # Valor padrão
-    if method == "SerpAPI Google Maps":
-        st.sidebar.header("🔢 Quantidade")
-        num_results = st.sidebar.number_input("Número de resultados a extrair:", min_value=10, max_value=100, value=50, step=10)
+    st.set_page_config(page_title=APP_TITLE, page_icon="🏢", layout="wide")
+    st.title(APP_TITLE)
+    st.caption("Foco em **qualidade de dado** com custo mínimo: SerpAPI (quando necessário) + fontes públicas de CNPJ.")
 
-    st.sidebar.header("🚀 Opções de Enriquecimento")
-    st.sidebar.caption("Aplicável a 'Google Places' e 'SerpAPI'")
-    incluir_emails_site = st.sidebar.checkbox("Buscar E-mails no site oficial", value=True)
-    incluir_cnpj = st.sidebar.checkbox("Buscar CNPJ e Sócios", value=True)
-    incluir_redes_sociais = st.sidebar.checkbox("Buscar Redes Sociais", value=False)
-    
-    col1, col2 = st.columns(2)
-    with col1: nicho = st.text_input("🎯 Nicho da empresa:", placeholder="ex: dentista, restaurante")
-    with col2: local = st.text_input("📍 Localização:", placeholder="ex: Belo Horizonte, MG")
-    
-    api_key, cnpj_list = None, []
-    if method == "Google Places API":
-        api_key = st.text_input("🔑 Google Places API Key:", type="password")
-        st.info("Nota: A Google Places API retorna um máximo de 20 resultados por busca.")
-    elif method == "SerpAPI Google Maps":
-        api_key = st.text_input("🔑 SerpAPI Key:", type="password")
-    elif method == "Dados Públicos CNPJ":
-        cnpj_text = st.text_area("📋 Lista de CNPJs (um por linha):", height=150)
-        if cnpj_text: cnpj_list = [cnpj.strip() for cnpj in cnpj_text.split('\n') if cnpj.strip()]
+    with st.expander("ℹ️ Dica de uso rápida", expanded=False):
+        st.markdown(
+            """
+            **Objetivo**: retornar *menos* contatos, porém *mais certos*.
 
-    if st.button("🚀 Extrair Dados", type="primary"):
-        results = []
-        is_enrichable = method in ["Google Places API", "SerpAPI Google Maps"]
-        with st.spinner("Iniciando extração..."):
-            if method == "Google Places API":
-                if api_key and nicho and local: results = google_places_search(nicho, local, api_key)
-                else: st.error("Preencha Nicho, Localização e API Key.")
-            elif method == "SerpAPI Google Maps":
-                # ALTERAÇÃO: Passando o número de resultados selecionado pelo usuário
-                if api_key and nicho and local: results = serpapi_google_maps(nicho, local, api_key, num_results)
-                else: st.error("Preencha Nicho, Localização e API Key.")
-            elif method == "Dados Públicos CNPJ":
-                if cnpj_list: results = search_cnpj_data(cnpj_list)
-                else: st.error("Insira pelo menos um CNPJ.")
-            elif method == "Busca Web Simples":
-                results = simple_web_search(nicho, local)
+            - Para **mineradoras no Pará**: teste *Rota 2 – CNPJ.biz* com termo "mineradora" e UF **PA**, depois filtrar por CNAE (07/08).
+            - Ative **Receita Federal** para validar situação e CNAE e **e-mails do site** para contato.
+            - A aba **Filtro & Pós-processamento** ajuda a eliminar telefones fora do DDD do Pará (91/93/94) quando fizer sentido.
+            """
+        )
 
-        if results and is_enrichable and (incluir_cnpj or incluir_redes_sociais or incluir_emails_site):
-            st.info(f"Extração inicial concluída com {len(results)} resultados. Iniciando enriquecimento...")
-            results = enriquecer_empresas(results, incluir_cnpj, incluir_redes_sociais, incluir_emails_site)
-        
-        if results:
-            df = pd.DataFrame(results).drop_duplicates(subset=['Nome'], keep='first').fillna('N/A')
-            st.success(f"✅ **{len(df)} empresas encontradas!**")
-            st.dataframe(df)
+    tab_busca, tab_refino, tab_result = st.tabs(["🔎 Busca", "🧹 Filtro & Pós-processamento", "📊 Resultados & Exportação"])
 
-            @st.cache_data
-            def to_excel(df_to_convert):
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df_to_convert.to_excel(writer, index=False, sheet_name='Empresas')
-                return output.getvalue()
-            
-            col1, col2 = st.columns(2)
-            col1.download_button("📥 Download CSV", df.to_csv(index=False, encoding='utf-8-sig'), f"empresas.csv", "text/csv")
-            col2.download_button("📊 Download Excel", to_excel(df), f"empresas.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    with tab_busca:
+        st.subheader("1) Escolha a Rota de Busca")
+        metodo = st.selectbox(
+            "Método de aquisição",
+            (
+                "Rota 1 – SerpAPI Google Maps",
+                "Rota 2 – CNPJ.biz (termo + UF)",
+                "Rota 3 – Importar CSV (CNPJ/Nome)",
+            ),
+        )
+
+        col = st.columns(3)
+        if metodo == "Rota 1 – SerpAPI Google Maps":
+            with col[0]:
+                nicho = st.text_input("🎯 Nicho / Query", value="mineradora")
+            with col[1]:
+                local = st.text_input("📍 Localização", value="Pará, Brasil")
+            with col[2]:
+                serp_key = st.text_input("🔑 SerpAPI Key", type="password")
+            max_r = st.slider("Qtd máx. resultados", 10, 100, 40, 10)
+
+        elif metodo == "Rota 2 – CNPJ.biz (termo + UF)":
+            with col[0]:
+                termo = st.text_input("🔎 Termo (ex.: mineradora, mineração, brita)", value="mineradora")
+            with col[1]:
+                uf = st.selectbox("UF", list(UF_NOMES.keys()), index=list(UF_NOMES.keys()).index("PA"))
+            with col[2]:
+                max_r = st.slider("Qtd máx. empresas", 10, 100, 40, 10)
+
+        else:  # Importar CSV
+            up = st.file_uploader("Envie um CSV com colunas CNPJ, Nome, Website (opcional)", type=["csv"]) 
+            df_import = None
+            if up is not None:
+                try:
+                    df_import = pd.read_csv(up)
+                except Exception:
+                    try:
+                        df_import = pd.read_csv(up, sep=";")
+                    except Exception:
+                        st.error("Não foi possível ler o CSV. Verifique o separador.")
+            max_r = st.slider("Qtd máx. linhas (para processamento)", 10, 2000, 200, 10)
+
+        st.markdown("---")
+        st.subheader("2) Enriquecimento (custo zero)")
+        col2 = st.columns(3)
+        with col2[0]:
+            use_receita = st.checkbox("Validar em Receita (CNPJ/CNAE/Situação)", value=True)
+        with col2[1]:
+            use_emails = st.checkbox("Buscar e-mails no site", value=True)
+        with col2[2]:
+            use_social = st.checkbox("Localizar redes sociais", value=False)
+
+        if st.button("🚀 Executar busca e enriquecer", type="primary"):
+            registros: list[dict] = []
+            with st.spinner("Buscando…"):
+                if metodo == "Rota 1 – SerpAPI Google Maps":
+                    registros = serpapi_google_maps(nicho, local, serp_key, num_results=max_r)
+                elif metodo == "Rota 2 – CNPJ.biz (termo + UF)":
+                    registros = cnpj_biz_busca_empresas(termo, uf, max_empresas=max_r)
+                else:
+                    if df_import is not None and len(df_import) > 0:
+                        tmp = df_import.head(max_r).to_dict(orient="records")
+                        # Normaliza chaves comuns
+                        for r in tmp:
+                            r.setdefault("Nome", r.get("nome") or r.get("Razao Social") or r.get("razao_social"))
+                            r.setdefault("CNPJ", r.get("cnpj") or r.get("CNPJ (Receita)"))
+                            r.setdefault("Website", r.get("website") or r.get("site"))
+                            r.setdefault("Origem", "CSV")
+                        registros = tmp
+                    else:
+                        st.warning("Envie um CSV válido para continuar.")
+
+            if registros:
+                st.success(f"{len(registros)} registros brutos obtidos. Iniciando enriquecimento…")
+                registros = enriquecer_empresas(
+                    registros,
+                    buscar_cnpj_receita=use_receita,
+                    buscar_redes=use_social,
+                    buscar_emails=use_emails,
+                )
+                st.session_state["resultados"] = registros
+                st.toast("Pronto! Vá para a aba *Resultados* para exportar e refinar.")
+            else:
+                st.warning("Nenhum registro encontrado.")
+
+    with tab_refino:
+        st.subheader("Refino opcional")
+        df = pd.DataFrame(st.session_state.get("resultados", []))
+        if df.empty:
+            st.info("Sem dados ainda. Execute uma busca na aba anterior.")
         else:
-            st.warning("⚠️ Nenhum resultado encontrado.")
+            colf = st.columns(4)
+            with colf[0]:
+                filtro_uf = st.selectbox("Filtrar por UF no endereço", ["(sem filtro)"] + list(UF_NOMES.keys()), index=1)
+            with colf[1]:
+                filtra_cnae_ini = st.text_input("CNAE começa com (ex.: 07, 08)")
+            with colf[2]:
+                somente_ddd_pa = st.checkbox("Telefone começa com DDD 91/93/94", value=False)
+            with colf[3]:
+                dedup_nome = st.checkbox("Deduplicar por Nome", value=True)
+
+            df2 = df.copy()
+            if filtro_uf != "(sem filtro)":
+                df2 = df2[df2["Endereço"].fillna("").str.contains(fr"\b{filtro_uf}\b|{UF_NOMES.get(filtro_uf)}", case=False, regex=True)]
+            if filtra_cnae_ini:
+                df2 = df2[df2["CNAE Principal"].fillna("").astype(str).str.startswith(filtra_cnae_ini)]
+            if somente_ddd_pa:
+                df2 = df2[df2["Telefone"].fillna("").astype(str).str[:2].isin(DDD_PA)]
+            if dedup_nome and "Nome" in df2.columns:
+                df2 = df2.drop_duplicates(subset=["Nome"]) 
+
+            st.dataframe(df2, use_container_width=True)
+            st.caption(f"Linhas após filtros: **{len(df2)}** (de {len(df)})")
+            st.session_state["df_filtrado"] = df2
+
+    with tab_result:
+        st.subheader("Exportação")
+        df = pd.DataFrame(st.session_state.get("df_filtrado") or st.session_state.get("resultados") or [])
+        if df.empty:
+            st.info("Sem dados para exportar. Faça uma busca e/ou aplique filtros.")
+        else:
+            st.dataframe(df, use_container_width=True)
+
+            def _to_excel_bytes(_df: pd.DataFrame) -> bytes:
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine="openpyxl") as w:
+                    _df.to_excel(w, index=False, sheet_name="Empresas")
+                return output.getvalue()
+
+            c1, c2 = st.columns(2)
+            c1.download_button(
+                "📥 Baixar CSV",
+                df.to_csv(index=False, encoding="utf-8-sig"),
+                file_name=f"prospectos-{slug(str(time.time()))}.csv",
+                mime="text/csv",
+            )
+            c2.download_button(
+                "📊 Baixar Excel",
+                _to_excel_bytes(df),
+                file_name=f"prospectos-{slug(str(time.time()))}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+            st.info(
+                "Dica: para este cliente (oficina de freios de caminhão), salve um filtro pré-definido com UF=PA e CNAE começando em **07** ou **08** quando a busca for por mineradoras."
+            )
+
 
 if __name__ == "__main__":
     main()
