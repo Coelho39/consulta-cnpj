@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup
 # Utilidades
 # ==============================================
 
-APP_TITLE = "🏢 Prospectador B2B – Prospecção Ativa (v7.4 - Anti-Bloqueio)"
+APP_TITLE = "🏢 Prospectador B2B – Prospecção Ativa (v7.5 - Nova Fonte)"
 
 UF_NOMES = {
     "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas",
@@ -37,17 +37,11 @@ def limpa_cnpj(cnpj: str) -> str:
 
 DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
 
-# ATUALIZAÇÃO: Função http_get agora aceita proxies
 @st.cache_data(ttl=60 * 30)
-def http_get(url: str, timeout: int = 30, headers: dict | None = None, proxy: str | None = None) -> requests.Response | None:
+def http_get(url: str, timeout: int = 30, headers: dict | None = None) -> requests.Response | None:
     try:
-        proxies = None
-        if proxy:
-            proxies = {"http": proxy, "https": proxy}
-        
         h = headers if headers else {"User-Agent": DEFAULT_UA}
-        
-        r = requests.get(url, headers=h, timeout=timeout, proxies=proxies)
+        r = requests.get(url, headers=h, timeout=timeout)
         r.raise_for_status()
         return r
     except requests.exceptions.RequestException as e:
@@ -57,7 +51,6 @@ def http_get(url: str, timeout: int = 30, headers: dict | None = None, proxy: st
 # ==============================================
 # Funções de Enriquecimento (buscar_dados_receita_federal, etc.)
 # ==============================================
-# (Estas funções não precisam de mudança, mas são incluídas para o código completo)
 @st.cache_data(ttl=60 * 60)
 def buscar_dados_receita_federal(cnpj: str) -> dict:
     c = limpa_cnpj(cnpj)
@@ -101,36 +94,41 @@ def encontrar_cnaes_por_descricao(descricao: str) -> list[dict]:
         st.error(f"Erro ao processar lista de CNAEs do IBGE: {e}")
         return []
 
-# ATUALIZAÇÃO: Função de scraping agora usa mais headers e aceita proxy
+# NOVA FUNÇÃO DE SCRAPING USANDO consultacnpj.com
 @st.cache_data(ttl=60 * 10)
-def raspar_cnpjs_por_cnae(cnae_code: str, uf: str, max_por_cnae: int, proxy: str | None) -> list[dict]:
-    cnae_limpo = re.sub(r'\D', '', cnae_code)
-    url = f"https://cnpj.biz/cnae/{cnae_limpo}/uf/{uf.lower()}"
+def raspar_cnpjs_consultacnpj(cnae_code: str, uf: str, max_por_cnae: int) -> list[dict]:
+    """Faz web scraping no site consultacnpj.com para encontrar empresas."""
+    cnae_formatado = f"{cnae_code[:4]}-{cnae_code[4]}/{cnae_code[5:]}"
+    url = f"https://consultacnpj.com/empresas?cnae_principal={cnae_formatado}&uf={uf.upper()}"
     
-    # Headers mais realistas para simular um navegador
     headers = {
         'User-Agent': DEFAULT_UA,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Referer': 'https://www.google.com/'
+        'Referer': 'https://consultacnpj.com/'
     }
     
-    r = http_get(url, headers=headers, proxy=proxy) # Passa o proxy para a função http_get
+    r = http_get(url, headers=headers)
     if not r: return []
         
     try:
         soup = BeautifulSoup(r.text, "html.parser")
         empresas = []
-        cards = soup.select("div.row > div[style*='padding: 20px']")
+        # Seletor para os cards de empresa no novo site
+        cards = soup.select(".card.company-card")
         
         for card in cards:
             if len(empresas) >= max_por_cnae: break
-            nome_tag = card.select_one("a")
-            cnpj_tag = card.find('b', text=re.compile(r'^\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}$'))
+            
+            nome_tag = card.select_one(".card-title a")
+            cnpj_tag = card.select_one(".company-document")
+
             if nome_tag and cnpj_tag:
+                nome = nome_tag.get_text(strip=True)
+                cnpj = cnpj_tag.get_text(strip=True)
                 empresas.append({
-                    "Nome": nome_tag.get_text(strip=True),
-                    "CNPJ": cnpj_tag.get_text(strip=True),
+                    "Nome": nome,
+                    "CNPJ": cnpj,
                     "Origem": f"Scraping CNAE {cnae_code}"
                 })
         return empresas
@@ -148,27 +146,23 @@ def main():
 
     metodo = st.selectbox(
         "Selecione o modo de operação",
-        ("---", "Rota 2 – Prospecção Ativa por Atividade (CNAE)",) # Simplificado para focar na rota principal
+        ("---", "Prospecção Ativa por Atividade (CNAE)",)
     )
 
-    if metodo == "Rota 2 – Prospecção Ativa por Atividade (CNAE)":
+    if metodo == "Prospecção Ativa por Atividade (CNAE)":
         st.subheader("🔎 Prospecção por Atividade Empresarial")
-        st.markdown("Esta ferramenta busca CNAEs no IBGE e depois raspa dados do site `cnpj.biz` para encontrar empresas.")
+        st.markdown("Esta ferramenta busca CNAEs no IBGE e depois raspa dados do site `consultacnpj.com`.")
         
         col1, col2 = st.columns(2)
         with col1:
             atividade = st.text_input("Digite a atividade", value="extração de minério de ferro")
-            uf = st.selectbox("Selecione o Estado (UF)", list(UF_NOMES.keys()), index=list(UF_NOMES.keys()).index("PA"))
         with col2:
-            max_cnaes = st.slider("Máximo de CNAEs a investigar", 1, 10, 3)
-            max_empresas_por_cnae = st.slider("Máximo de empresas por CNAE", 5, 50, 10)
-
-        with st.expander("⚙️ Configurações Avançadas (Anti-Bloqueio)"):
-            proxy = st.text_input("Endereço do Proxy (opcional)", placeholder="http://usuario:senha@host:porta")
-            st.caption("Use se o acesso estiver sendo bloqueado (erro 403). Requer um serviço de proxy pago.")
+            uf = st.selectbox("Selecione o Estado (UF)", list(UF_NOMES.keys()), index=list(UF_NOMES.keys()).index("PA"))
+        
+        max_cnaes = st.slider("Máximo de CNAEs a investigar", 1, 10, 3)
+        max_empresas_por_cnae = st.slider("Máximo de empresas por CNAE", 5, 50, 10)
 
         if st.button("🚀 Iniciar Prospecção Ativa", type="primary"):
-            # ... (Lógica da prospecção permanece a mesma, apenas passando o proxy)
             cnaes_encontrados = encontrar_cnaes_por_descricao(atividade)
             if not cnaes_encontrados:
                 st.error(f"Nenhum CNAE encontrado para '{atividade}'.")
@@ -181,10 +175,11 @@ def main():
             for i, cnae in enumerate(cnaes_encontrados[:max_cnaes]):
                 cnae_cod, cnae_desc = cnae['codigo'], cnae['descricao']
                 pb.progress((i + 1) / max_cnaes, f"Buscando em '{cnae_desc[:50]}...'")
-                # Passando o proxy para a função de scraping
-                registros_cnae = raspar_cnpjs_por_cnae(cnae_cod, uf, max_empresas_por_cnae, proxy)
+                
+                # Chamando a NOVA função de scraping
+                registros_cnae = raspar_cnpjs_consultacnpj(cnae_cod, uf, max_empresas_por_cnae)
                 todos_registros.extend(registros_cnae)
-                time.sleep(random.uniform(1.5, 3)) # Aumentar a pausa
+                time.sleep(random.uniform(1, 2))
 
             pb.empty()
             if not todos_registros:
@@ -208,7 +203,18 @@ def main():
         st.header("📊 Resultados")
         df_final = pd.DataFrame(st.session_state.get("resultados", []))
         st.dataframe(df_final)
-        # ... (Lógica de download permanece a mesma)
+        
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df_final.to_excel(writer, index=False, sheet_name='Prospects')
+        excel_data = output.getvalue()
+        
+        st.download_button(
+            label="📥 Baixar resultados em Excel (.xlsx)",
+            data=excel_data,
+            file_name=f"prospects_{slug(metodo if metodo != '---' else 'resultados')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
 if __name__ == "__main__":
     main()
