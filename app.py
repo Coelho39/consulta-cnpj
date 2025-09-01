@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup
 # Utilidades
 # ==============================================
 
-APP_TITLE = "🏢 Prospectador B2B – Prospecção Ativa (v7.2)"
+APP_TITLE = "🏢 Prospectador B2B – Prospecção Ativa (v7.3 - IBGE)"
 
 UF_NOMES = {
     "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas",
@@ -41,7 +41,7 @@ DEFAULT_UA = (
 )
 
 @st.cache_data(ttl=60 * 30)
-def http_get(url: str, timeout: int = 25, headers: dict | None = None) -> requests.Response | None:
+def http_get(url: str, timeout: int = 30, headers: dict | None = None) -> requests.Response | None:
     try:
         h = {"User-Agent": DEFAULT_UA}
         if headers:
@@ -112,15 +112,15 @@ def buscar_emails_site(website: str, timeout: int = 12) -> list[str]:
 
 @st.cache_data(ttl=60 * 60)
 def encontrar_cnaes_por_descricao(descricao: str) -> list[dict]:
-    """Encontra todos os CNAEs que correspondem a uma descrição de atividade."""
+    """Encontra todos os CNAEs que correspondem a uma descrição de atividade usando a API do IBGE."""
     if not descricao:
         return []
     
-    # CORREÇÃO: URL ajustada para o endpoint correto da API de CNAEs.
-    url = "https://brasilapi.com.br/api/cnaes/v1"
+    # MUDANÇA: Usando a API oficial e estável do IBGE
+    url = "https://servicodados.ibge.gov.br/api/v2/cnae/subclasses"
     r = http_get(url)
     if not r:
-        st.error("Não foi possível acessar a lista de CNAEs da BrasilAPI.")
+        st.error("Não foi possível acessar a lista de CNAEs do IBGE.")
         return []
     
     try:
@@ -128,13 +128,14 @@ def encontrar_cnaes_por_descricao(descricao: str) -> list[dict]:
         cnaes_encontrados = []
         for cnae in todos_cnaes:
             if descricao.lower() in cnae.get("descricao", "").lower():
+                # Adapta a saída para o formato que o resto do programa espera
                 cnaes_encontrados.append({
-                    "codigo": str(cnae.get("codigo")),
+                    "codigo": str(cnae.get("id")),
                     "descricao": cnae.get("descricao")
                 })
         return cnaes_encontrados
     except Exception as e:
-        st.error(f"Erro ao processar lista de CNAEs: {e}")
+        st.error(f"Erro ao processar lista de CNAEs do IBGE: {e}")
         return []
 
 @st.cache_data(ttl=60 * 10)
@@ -150,7 +151,6 @@ def raspar_cnpjs_por_cnae(cnae_code: str, uf: str, max_por_cnae: int) -> list[di
     try:
         soup = BeautifulSoup(r.text, "html.parser")
         empresas = []
-        # O seletor abaixo pode precisar de ajuste se o site mudar
         cards = soup.select("div.row > div[style*='padding: 20px']")
         
         for card in cards:
@@ -206,7 +206,7 @@ def main():
         max_empresas_por_cnae = st.slider("Máximo de empresas a buscar por CNAE", 5, 50, 10)
 
         if st.button("🚀 Iniciar Prospecção Ativa", type="primary"):
-            with st.spinner("Passo 1: Encontrando CNAEs relacionados à atividade..."):
+            with st.spinner("Passo 1: Encontrando CNAEs relacionados na base do IBGE..."):
                 cnaes_encontrados = encontrar_cnaes_por_descricao(atividade)
             
             if not cnaes_encontrados:
@@ -243,7 +243,6 @@ def main():
                 pb_enriquecimento.progress((i + 1) / len(todos_registros), f"Enriquecendo {reg.get('Nome')[:40]}...")
                 dados_ricos = buscar_dados_receita_federal(reg.get("CNPJ"))
                 if dados_ricos:
-                    # Tenta buscar emails usando o nome da empresa se não houver site
                     website_slug = slug(dados_ricos.get('Nome Fantasia') or dados_ricos.get('Nome'))
                     emails = buscar_emails_site(f"http://www.{website_slug}.com.br")
                     dados_ricos["Emails do Site"] = ", ".join(emails) if emails else None
