@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup
 # Utilidades
 # ==============================================
 
-APP_TITLE = "🏢 Prospectador B2B – Prospecção Ativa (v7.5 - Nova Fonte)"
+APP_TITLE = "🏢 Prospectador B2B – Prospecção Ativa (v7.6 - URL Definitiva)"
 
 UF_NOMES = {
     "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas",
@@ -49,7 +49,7 @@ def http_get(url: str, timeout: int = 30, headers: dict | None = None) -> reques
         return None
 
 # ==============================================
-# Funções de Enriquecimento (buscar_dados_receita_federal, etc.)
+# Funções de Enriquecimento
 # ==============================================
 @st.cache_data(ttl=60 * 60)
 def buscar_dados_receita_federal(cnpj: str) -> dict:
@@ -72,7 +72,7 @@ def buscar_dados_receita_federal(cnpj: str) -> dict:
     return {}
 
 # ==============================================
-# Funções para a Prospecção Ativa (Rota 2)
+# Funções para a Prospecção Ativa
 # ==============================================
 
 @st.cache_data(ttl=60 * 60)
@@ -94,17 +94,20 @@ def encontrar_cnaes_por_descricao(descricao: str) -> list[dict]:
         st.error(f"Erro ao processar lista de CNAEs do IBGE: {e}")
         return []
 
-# NOVA FUNÇÃO DE SCRAPING USANDO consultacnpj.com
+# ATUALIZAÇÃO: Função de scraping com a construção de URL correta
 @st.cache_data(ttl=60 * 10)
-def raspar_cnpjs_consultacnpj(cnae_code: str, uf: str, max_por_cnae: int) -> list[dict]:
-    """Faz web scraping no site consultacnpj.com para encontrar empresas."""
-    cnae_formatado = f"{cnae_code[:4]}-{cnae_code[4]}/{cnae_code[5:]}"
-    url = f"https://consultacnpj.com/empresas?cnae_principal={cnae_formatado}&uf={uf.upper()}"
+def raspar_cnpjs_consultacnpj(cnae_code: str, cnae_desc: str, uf: str, max_por_cnae: int) -> list[dict]:
+    """Faz web scraping no site consultacnpj.com usando a estrutura de URL com slug."""
+    cnae_limpo = re.sub(r'\D', '', cnae_code)
+    cnae_slug = slug(cnae_desc)
     
+    # Construção da URL correta, baseada na estrutura real do site
+    url = f"https://consultacnpj.com/cnae/{cnae_slug}-cnae-{cnae_limpo}/{uf.lower()}"
+    st.info(f"Acessando: {url}") # Mostra a URL que está sendo acessada para depuração
+
     headers = {
         'User-Agent': DEFAULT_UA,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
         'Referer': 'https://consultacnpj.com/'
     }
     
@@ -114,7 +117,6 @@ def raspar_cnpjs_consultacnpj(cnae_code: str, uf: str, max_por_cnae: int) -> lis
     try:
         soup = BeautifulSoup(r.text, "html.parser")
         empresas = []
-        # Seletor para os cards de empresa no novo site
         cards = soup.select(".card.company-card")
         
         for card in cards:
@@ -124,11 +126,9 @@ def raspar_cnpjs_consultacnpj(cnae_code: str, uf: str, max_por_cnae: int) -> lis
             cnpj_tag = card.select_one(".company-document")
 
             if nome_tag and cnpj_tag:
-                nome = nome_tag.get_text(strip=True)
-                cnpj = cnpj_tag.get_text(strip=True)
                 empresas.append({
-                    "Nome": nome,
-                    "CNPJ": cnpj,
+                    "Nome": nome_tag.get_text(strip=True),
+                    "CNPJ": cnpj_tag.get_text(strip=True),
                     "Origem": f"Scraping CNAE {cnae_code}"
                 })
         return empresas
@@ -176,8 +176,8 @@ def main():
                 cnae_cod, cnae_desc = cnae['codigo'], cnae['descricao']
                 pb.progress((i + 1) / max_cnaes, f"Buscando em '{cnae_desc[:50]}...'")
                 
-                # Chamando a NOVA função de scraping
-                registros_cnae = raspar_cnpjs_consultacnpj(cnae_cod, uf, max_empresas_por_cnae)
+                # ATUALIZAÇÃO: Passando a descrição do CNAE para a função de scraping
+                registros_cnae = raspar_cnpjs_consultacnpj(cnae_cod, cnae_desc, uf, max_empresas_por_cnae)
                 todos_registros.extend(registros_cnae)
                 time.sleep(random.uniform(1, 2))
 
