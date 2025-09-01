@@ -16,9 +16,18 @@ from bs4 import BeautifulSoup
 # Utilidades
 # ==============================================
 
-APP_TITLE = "🏢 Prospectador B2B – Prospecção Ativa (v7)"
+APP_TITLE = "🏢 Prospectador B2B – Prospecção Ativa (v7.1)"
 
-# ... (O resto das funções de utilidade como slug, limpa_cnpj, etc., continuam as mesmas)
+UF_NOMES = {
+    "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas",
+    "BA": "Bahia", "CE": "Ceará", "DF": "Distrito Federal", "ES": "Espírito Santo",
+    "GO": "Goiás", "MA": "Maranhão", "MT": "Mato Grosso", "MS": "Mato Grosso do Sul",
+    "MG": "Minas Gerais", "PA": "Pará", "PB": "Paraíba", "PR": "Paraná",
+    "PE": "Pernambuco", "PI": "Piauí", "RJ": "Rio de Janeiro", "RN": "Rio Grande do Norte",
+    "RS": "Rio Grande do Sul", "RO": "Rondônia", "RR": "Roraima", "SC": "Santa Catarina",
+    "SP": "São Paulo", "SE": "Sergipe", "TO": "Tocantins"
+}
+
 def slug(s: str) -> str:
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
@@ -45,7 +54,7 @@ def http_get(url: str, timeout: int = 25, headers: dict | None = None) -> reques
         return None
 
 # ==============================================
-# Funções de Enriquecimento (buscar e-mails, redes sociais, etc.)
+# Funções de Enriquecimento
 # ==============================================
 
 @st.cache_data(ttl=60 * 60)
@@ -98,12 +107,11 @@ def buscar_emails_site(website: str, timeout: int = 12) -> list[str]:
     return sorted({e for e in emails if not re.search(r"\.(png|jpg|jpeg|gif|svg)$", e)})
 
 # ==============================================
-# NOVAS FUNÇÕES PARA A PROSPECÇÃO ATIVA (ROTA 2)
+# Funções para a Prospecção Ativa (Rota 2)
 # ==============================================
 
 @st.cache_data(ttl=60 * 60)
 def encontrar_cnaes_por_descricao(descricao: str) -> list[dict]:
-    """Encontra todos os CNAEs que correspondem a uma descrição de atividade."""
     if not descricao:
         return []
     
@@ -129,7 +137,6 @@ def encontrar_cnaes_por_descricao(descricao: str) -> list[dict]:
 
 @st.cache_data(ttl=60 * 10)
 def raspar_cnpjs_por_cnae(cnae_code: str, uf: str, max_por_cnae: int) -> list[dict]:
-    """Faz web scraping no site cnpj.biz para encontrar empresas por CNAE e UF."""
     cnae_limpo = re.sub(r'\D', '', cnae_code)
     url = f"https://cnpj.biz/cnae/{cnae_limpo}/uf/{uf.lower()}"
     
@@ -140,7 +147,6 @@ def raspar_cnpjs_por_cnae(cnae_code: str, uf: str, max_por_cnae: int) -> list[di
     try:
         soup = BeautifulSoup(r.text, "html.parser")
         empresas = []
-        # O seletor abaixo pode precisar de ajuste se o site mudar
         cards = soup.select("div.row > div[style*='padding: 20px']")
         
         for card in cards:
@@ -170,7 +176,8 @@ def raspar_cnpjs_por_cnae(cnae_code: str, uf: str, max_por_cnae: int) -> list[di
 
 def main():
     st.set_page_config(page_title=APP_TITLE, page_icon="🏢", layout="wide")
-    st.title(APP_title)
+    # CORREÇÃO: A variável aqui deve ser maiúscula para corresponder à sua definição.
+    st.title(APP_TITLE)
     st.markdown("Uma ferramenta para descobrir e enriquecer contatos de empresas (B2B).")
 
     metodo = st.selectbox(
@@ -217,7 +224,7 @@ def main():
                 with st.spinner(f"Buscando empresas para o CNAE {cnae_cod}..."):
                     registros_cnae = raspar_cnpjs_por_cnae(cnae_cod, uf, max_empresas_por_cnae)
                     todos_registros.extend(registros_cnae)
-                    time.sleep(random.uniform(1, 2)) # Pausa para não sobrecarregar o site
+                    time.sleep(random.uniform(1, 2))
 
             pb.empty()
 
@@ -233,9 +240,9 @@ def main():
                 pb_enriquecimento.progress((i + 1) / len(todos_registros), f"Enriquecendo {reg.get('Nome')[:40]}...")
                 dados_ricos = buscar_dados_receita_federal(reg.get("CNPJ"))
                 if dados_ricos:
-                    # Tenta buscar emails usando o nome da empresa se não houver site
-                    website = next(iter(buscar_emails_site(f"http://www.{slug(dados_ricos.get('Nome Fantasia') or dados_ricos.get('Nome'))}.com.br")), None)
-                    dados_ricos["Emails do Site"] = website
+                    website_slug = slug(dados_ricos.get('Nome Fantasia') or dados_ricos.get('Nome'))
+                    emails = buscar_emails_site(f"http://www.{website_slug}.com.br")
+                    dados_ricos["Emails do Site"] = ", ".join(emails) if emails else None
                     registros_finais.append(dados_ricos)
 
             pb_enriquecimento.empty()
@@ -243,8 +250,6 @@ def main():
             st.success("Prospecção e enriquecimento concluídos!")
             st.dataframe(pd.DataFrame(registros_finais))
 
-    # Adicione aqui as outras rotas se desejar, ou foque nesta.
-    
     if "resultados" in st.session_state and st.session_state["resultados"]:
         st.header("📊 Resultados")
         df_final = pd.DataFrame(st.session_state.get("resultados", []))
@@ -258,10 +263,9 @@ def main():
         st.download_button(
             label="📥 Baixar resultados em Excel (.xlsx)",
             data=excel_data,
-            file_name=f"prospects_{slug(metodo)}.xlsx",
+            file_name=f"prospects_{slug(metodo if metodo != '---' else 'resultados')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-# O ponto de entrada do script
 if __name__ == "__main__":
     main()
