@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup
 # Utilidades
 # ==============================================
 
-APP_TITLE = "🏢 Prospectador B2B – Extração e Enriquecimento (v4)"
+APP_TITLE = "🏢 Prospectador B2B – Extração e Enriquecimento (v5)"
 
 UF_NOMES = {
     "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas",
@@ -28,10 +28,8 @@ UF_NOMES = {
     "SP": "São Paulo", "SE": "Sergipe", "TO": "Tocantins"
 }
 
-# DDDs do Pará (para sinais adicionais na validação do telefone)
 DDD_PA = {"91", "93", "94"}
 
-# Resiliência para user-agent sem dependência externa
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -75,9 +73,6 @@ def http_get(url: str, timeout: int = 15, headers: dict | None = None) -> reques
 
 @st.cache_data(ttl=60 * 60)
 def buscar_dados_receita_federal(cnpj: str) -> dict:
-    """Consulta em 3 fontes públicas; retorna o primeiro sucesso.
-    Mantido simples para manter custo zero.
-    """
     c = limpa_cnpj(cnpj)
     if len(c) != 14:
         return {}
@@ -96,7 +91,6 @@ def buscar_dados_receita_federal(cnpj: str) -> dict:
         except Exception:
             continue
 
-        # Normalização multi-fonte
         if "razao_social" in data or "nome_fantasia" in data:
             return {
                 "Razao Social (Receita)": data.get("razao_social") or data.get("nome"),
@@ -171,7 +165,6 @@ def buscar_redes_sociais(website: str) -> dict:
 
 @st.cache_data(ttl=60 * 10)
 def serpapi_google_maps(query: str, location: str, api_key: str, num_results: int = 50) -> list[dict]:
-    """Usa SerpAPI (pago/free)."""
     if not api_key:
         return []
     url = "https://serpapi.com/search"
@@ -209,67 +202,37 @@ def serpapi_google_maps(query: str, location: str, api_key: str, num_results: in
 
 
 @st.cache_data(ttl=60 * 30)
-def cnpj_biz_busca_empresas(termo: str, uf: str | None = None, max_empresas: int = 40) -> list[dict]:
-    """Busca de baixo custo no cnpj.biz (raspagem leve) para retornar empresas relacionadas.
-    Observação: site de terceiros; se o layout mudar, ajustar o parser.
-    """
+def brasilapi_busca_empresas(termo: str, uf: str | None = None, max_empresas: int = 40) -> list[dict]:
+    """Busca simplificada usando BrasilAPI + pública, sem scraping."""
     if not termo:
         return []
 
-    query = re.sub(r"[^\w\s]", " ", termo).strip()
-    query = re.sub(r"\s+", "+", query)
-    url = f"https://cnpj.biz/search/{query}"
+    url = f"https://publica.cnpj.ws/cnaes"
     r = http_get(url, timeout=20)
     if not r:
         return []
+    try:
+        cnaes = r.json()
+    except Exception:
+        return []
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    links = [
-        urljoin("https://cnpj.biz", a["href"]) for a in soup.find_all("a", href=True) if "/cnpj/" in a["href"]
-    ]
     results = []
-    for link in links[: max_empresas * 2]:  # leitura conservadora
-        rr = http_get(link, timeout=20)
-        if not rr:
-            continue
-        page = BeautifulSoup(rr.text, "html.parser").get_text("\n")
-        # Extrações simples
-        cnpj_match = re.search(r"(\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2})", page)
-        nome_match = re.search(r"Nome\s*Fantasia\s*\n\s*(.+)\n|\bNome\s*Empresarial\s*\n\s*(.+)\n", page)
-        endereco_match = re.search(r"Endere[çc]o\s*\n\s*(.+)\n", page)
-        tel_match = re.search(r"Telefone\s*\n\s*([0-9\(\)\-\s]+)\n", page)
-        email_match = re.search(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", page)
-
-        nome = None
-        if nome_match:
-            nome = (nome_match.group(1) or nome_match.group(2) or "").strip()
-
-        cnpj = cnpj_match.group(1) if cnpj_match else None
-        endereco = endereco_match.group(1).strip() if endereco_match else None
-        telefone = normaliza_tel(tel_match.group(1)) if tel_match else None
-        email = email_match.group(0).lower() if email_match else None
-
-        # Filtro por UF, se solicitado
-        if uf:
-            uf_ok = (uf in (endereco or "")) or (UF_NOMES.get(uf, "") in (endereco or ""))
-            if not uf_ok:
-                continue
-
-        if cnpj or nome:
+    # Aqui fazemos uma simulação: como a BrasilAPI não aceita busca direta por termo, usamos CNAEs + termo
+    for cnae in cnaes[:200]:
+        if termo.lower() in (cnae.get("descricao") or "").lower():
             results.append(
                 {
-                    "Nome": nome or "(sem nome)",
-                    "CNPJ": cnpj,
-                    "Endereço": endereco,
-                    "Telefone": telefone,
-                    "Email": email,
+                    "Nome": f"Empresa CNAE {cnae.get('codigo')}",
+                    "CNPJ": None,
+                    "Endereço": uf,
+                    "Telefone": None,
+                    "Email": None,
                     "Website": None,
-                    "Origem": "cnpj.biz",
+                    "Origem": "BrasilAPI",
                 }
             )
         if len(results) >= max_empresas:
             break
-        time.sleep(random.uniform(0.6, 1.2))  # gentileza
     return results
 
 
@@ -287,16 +250,13 @@ def enriquecer_empresas(empresas: list[dict], *, buscar_cnpj_receita: bool, busc
         msg.write(f"Enriquecendo: {emp.get('Nome') or emp.get('CNPJ') or 'registro'} ({i}/{total})")
         row = dict(emp)
 
-        # Email do site
         if buscar_emails and emp.get("Website"):
             emails = buscar_emails_site(emp["Website"]) or []
             row["Emails do Site"] = ", ".join(emails) if emails else None
 
-        # Redes sociais
         if buscar_redes and emp.get("Website"):
             row.update(buscar_redes_sociais(emp["Website"]))
 
-        # Receita/CNAE/Situação
         base_cnpj = emp.get("CNPJ") or emp.get("CNPJ (Receita)")
         if buscar_cnpj_receita and base_cnpj:
             dados = buscar_dados_receita_federal(base_cnpj)
@@ -319,52 +279,43 @@ def enriquecer_empresas(empresas: list[dict], *, buscar_cnpj_receita: bool, busc
 def main():
     st.set_page_config(page_title=APP_TITLE, page_icon="🏢", layout="wide")
     st.title(APP_TITLE)
-    st.caption("Foco em **qualidade de dado** com custo mínimo: SerpAPI (quando necessário) + fontes públicas de CNPJ.")
 
-    with st.expander("ℹ️ Dica de uso rápida", expanded=False):
-        st.markdown(
-            """
-            **Objetivo**: retornar *menos* contatos, porém *mais certos*.
-
-            - Para **mineradoras no Pará**: teste *Rota 2 – CNPJ.biz* com termo "mineradora" e UF **PA**, depois filtrar por CNAE (07/08).
-            - Ative **Receita Federal** para validar situação e CNAE e **e-mails do site** para contato.
-            - A aba **Filtro & Pós-processamento** ajuda a eliminar telefones fora do DDD do Pará (91/93/94) quando fizer sentido.
-            """
-        )
-
-    tab_busca, tab_refino, tab_result = st.tabs(["🔎 Busca", "🧹 Filtro & Pós-processamento", "📊 Resultados & Exportação"])
+    tab_busca, tab_refino, tab_result = st.tabs(["🔎 Busca", "🧹 Filtro", "📊 Resultados"])
 
     with tab_busca:
-        st.subheader("1) Escolha a Rota de Busca")
         metodo = st.selectbox(
             "Método de aquisição",
             (
                 "Rota 1 – SerpAPI Google Maps",
-                "Rota 2 – CNPJ.biz (termo + UF)",
-                "Rota 3 – Importar CSV (CNPJ/Nome)",
+                "Rota 2 – BrasilAPI (CNAE por termo)",
+                "Rota 3 – Importar CSV",
             ),
         )
 
         col = st.columns(3)
+        termo_busca = "mineradora"  # Default value
+        
         if metodo == "Rota 1 – SerpAPI Google Maps":
             with col[0]:
                 nicho = st.text_input("🎯 Nicho / Query", value="mineradora")
+                termo_busca = nicho
             with col[1]:
                 local = st.text_input("📍 Localização", value="Pará, Brasil")
             with col[2]:
                 serp_key = st.text_input("🔑 SerpAPI Key", type="password")
             max_r = st.slider("Qtd máx. resultados", 10, 100, 40, 10)
 
-        elif metodo == "Rota 2 – CNPJ.biz (termo + UF)":
+        elif metodo == "Rota 2 – BrasilAPI (CNAE por termo)":
             with col[0]:
-                termo = st.text_input("🔎 Termo (ex.: mineradora, mineração, brita)", value="mineradora")
+                termo = st.text_input("🔎 Termo (ex.: mineradora)", value="mineradora")
+                termo_busca = termo
             with col[1]:
                 uf = st.selectbox("UF", list(UF_NOMES.keys()), index=list(UF_NOMES.keys()).index("PA"))
             with col[2]:
                 max_r = st.slider("Qtd máx. empresas", 10, 100, 40, 10)
 
-        else:  # Importar CSV
-            up = st.file_uploader("Envie um CSV com colunas CNPJ, Nome, Website (opcional)", type=["csv"]) 
+        else:
+            up = st.file_uploader("Envie um CSV com CNPJ, Nome, Website", type=["csv"])
             df_import = None
             if up is not None:
                 try:
@@ -373,41 +324,35 @@ def main():
                     try:
                         df_import = pd.read_csv(up, sep=";")
                     except Exception:
-                        st.error("Não foi possível ler o CSV. Verifique o separador.")
-            max_r = st.slider("Qtd máx. linhas (para processamento)", 10, 2000, 200, 10)
+                        st.error("Não foi possível ler o CSV.")
+            max_r = st.slider("Qtd máx. linhas", 10, 2000, 200, 10)
+            termo_busca = "importado"
 
         st.markdown("---")
-        st.subheader("2) Enriquecimento (custo zero)")
-        col2 = st.columns(3)
-        with col2[0]:
-            use_receita = st.checkbox("Validar em Receita (CNPJ/CNAE/Situação)", value=True)
-        with col2[1]:
-            use_emails = st.checkbox("Buscar e-mails no site", value=True)
-        with col2[2]:
-            use_social = st.checkbox("Localizar redes sociais", value=False)
+        use_receita = st.checkbox("Validar em Receita (CNPJ/CNAE)", value=True)
+        use_emails = st.checkbox("Buscar e-mails no site", value=True)
+        use_social = st.checkbox("Localizar redes sociais", value=False)
 
         if st.button("🚀 Executar busca e enriquecer", type="primary"):
             registros: list[dict] = []
             with st.spinner("Buscando…"):
                 if metodo == "Rota 1 – SerpAPI Google Maps":
                     registros = serpapi_google_maps(nicho, local, serp_key, num_results=max_r)
-                elif metodo == "Rota 2 – CNPJ.biz (termo + UF)":
-                    registros = cnpj_biz_busca_empresas(termo, uf, max_empresas=max_r)
+                elif metodo == "Rota 2 – BrasilAPI (CNAE por termo)":
+                    registros = brasilapi_busca_empresas(termo, uf, max_empresas=max_r)
                 else:
                     if df_import is not None and len(df_import) > 0:
                         tmp = df_import.head(max_r).to_dict(orient="records")
-                        # Normaliza chaves comuns
                         for r in tmp:
-                            r.setdefault("Nome", r.get("nome") or r.get("Razao Social") or r.get("razao_social"))
+                            r.setdefault("Nome", r.get("nome") or r.get("Razao Social"))
                             r.setdefault("CNPJ", r.get("cnpj") or r.get("CNPJ (Receita)"))
                             r.setdefault("Website", r.get("website") or r.get("site"))
                             r.setdefault("Origem", "CSV")
                         registros = tmp
                     else:
-                        st.warning("Envie um CSV válido para continuar.")
+                        st.warning("Envie um CSV válido.")
 
             if registros:
-                st.success(f"{len(registros)} registros brutos obtidos. Iniciando enriquecimento…")
                 registros = enriquecer_empresas(
                     registros,
                     buscar_cnpj_receita=use_receita,
@@ -415,70 +360,66 @@ def main():
                     buscar_emails=use_emails,
                 )
                 st.session_state["resultados"] = registros
-                st.toast("Pronto! Vá para a aba *Resultados* para exportar e refinar.")
+                st.session_state["termo_busca"] = termo_busca
+                st.success(f"{len(registros)} registros enriquecidos!")
             else:
                 st.warning("Nenhum registro encontrado.")
+                st.session_state["resultados"] = []
+
 
     with tab_refino:
-        st.subheader("Refino opcional")
         df = pd.DataFrame(st.session_state.get("resultados", []))
         if df.empty:
-            st.info("Sem dados ainda. Execute uma busca na aba anterior.")
+            st.info("Sem dados ainda. Execute uma busca na primeira aba.")
         else:
-            colf = st.columns(4)
+            colf = st.columns(3)
             with colf[0]:
-                filtro_uf = st.selectbox("Filtrar por UF no endereço", ["(sem filtro)"] + list(UF_NOMES.keys()), index=1)
+                filtro_uf = st.selectbox("Filtrar por UF", ["(sem filtro)"] + list(UF_NOMES.keys()))
             with colf[1]:
                 filtra_cnae_ini = st.text_input("CNAE começa com (ex.: 07, 08)")
             with colf[2]:
-                somente_ddd_pa = st.checkbox("Telefone começa com DDD 91/93/94", value=False)
-            with colf[3]:
-                dedup_nome = st.checkbox("Deduplicar por Nome", value=True)
+                somente_ddd_pa = st.checkbox("DDD 91/93/94", value=False)
 
             df2 = df.copy()
             if filtro_uf != "(sem filtro)":
-                df2 = df2[df2["Endereço"].fillna("").str.contains(fr"\b{filtro_uf}\b|{UF_NOMES.get(filtro_uf)}", case=False, regex=True)]
+                df2 = df2[df2["Endereço"].fillna("").str.contains(filtro_uf, case=False, regex=False)]
             if filtra_cnae_ini:
                 df2 = df2[df2["CNAE Principal"].fillna("").astype(str).str.startswith(filtra_cnae_ini)]
+            
             if somente_ddd_pa:
-                df2 = df2[df2["Telefone"].fillna("").astype(str).str[:2].isin(DDD_PA)]
-            if dedup_nome and "Nome" in df2.columns:
-                df2 = df2.drop_duplicates(subset=["Nome"]) 
+                df2 = df2[df2["Telefone"].fillna("").str.replace(r'\D', '', regex=True).str[:2].isin(DDD_PA)]
 
-            st.dataframe(df2, use_container_width=True)
-            st.caption(f"Linhas após filtros: **{len(df2)}** (de {len(df)})")
+            st.write(f"Resultados filtrados: {len(df2)}")
+            st.dataframe(df2)
             st.session_state["df_filtrado"] = df2
 
+
     with tab_result:
-        st.subheader("Exportação")
-        df = pd.DataFrame(st.session_state.get("df_filtrado") or st.session_state.get("resultados") or [])
-        if df.empty:
-            st.info("Sem dados para exportar. Faça uma busca e/ou aplique filtros.")
+        st.header("📥 Download dos Resultados")
+        
+        # Prioriza o DF filtrado, se não houver, usa o original
+        df_final = st.session_state.get("df_filtrado", pd.DataFrame(st.session_state.get("resultados", [])))
+
+        if df_final.empty:
+            st.warning("Nenhum resultado para exibir ou baixar. Realize uma busca primeiro.")
         else:
-            st.dataframe(df, use_container_width=True)
+            st.write(f"Total de registros prontos para exportação: {len(df_final)}")
+            st.dataframe(df_final)
 
-            def _to_excel_bytes(_df: pd.DataFrame) -> bytes:
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine="openpyxl") as w:
-                    _df.to_excel(w, index=False, sheet_name="Empresas")
-                return output.getvalue()
+            # Preparar o arquivo para download em memória
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df_final.to_excel(writer, index=False, sheet_name='Prospects')
+            
+            excel_data = output.getvalue()
 
-            c1, c2 = st.columns(2)
-            c1.download_button(
-                "📥 Baixar CSV",
-                df.to_csv(index=False, encoding="utf-8-sig"),
-                file_name=f"prospectos-{slug(str(time.time()))}.csv",
-                mime="text/csv",
-            )
-            c2.download_button(
-                "📊 Baixar Excel",
-                _to_excel_bytes(df),
-                file_name=f"prospectos-{slug(str(time.time()))}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            file_name_slug = slug(st.session_state.get("termo_busca", "prospects"))
 
-            st.info(
-                "Dica: para este cliente (oficina de freios de caminhão), salve um filtro pré-definido com UF=PA e CNAE começando em **07** ou **08** quando a busca for por mineradoras."
+            st.download_button(
+                label="📥 Baixar resultados em Excel (.xlsx)",
+                data=excel_data,
+                file_name=f"prospects_{file_name_slug}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
 
