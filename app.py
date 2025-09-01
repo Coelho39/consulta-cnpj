@@ -5,7 +5,7 @@ import time
 import json
 import random
 import unicodedata
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 
 import requests
 import pandas as pd
@@ -55,7 +55,7 @@ def normaliza_tel(t: str) -> str:
 
 
 @st.cache_data(ttl=60 * 30)
-def http_get(url: str, timeout: int = 15, headers: dict | None = None) -> requests.Response | None:
+def http_get(url: str, timeout: int = 25, headers: dict | None = None) -> requests.Response | None:
     try:
         h = {"User-Agent": DEFAULT_UA}
         if headers:
@@ -63,7 +63,8 @@ def http_get(url: str, timeout: int = 15, headers: dict | None = None) -> reques
         r = requests.get(url, headers=h, timeout=timeout)
         r.raise_for_status()
         return r
-    except Exception:
+    except Exception as e:
+        st.error(f"Erro de conexão: {e}")
         return None
 
 
@@ -166,6 +167,7 @@ def buscar_redes_sociais(website: str) -> dict:
 @st.cache_data(ttl=60 * 10)
 def serpapi_google_maps(query: str, location: str, api_key: str, num_results: int = 50) -> list[dict]:
     if not api_key:
+        st.error("Por favor, insira uma chave de API da SerpAPI.")
         return []
     url = "https://serpapi.com/search"
     params = {
@@ -201,39 +203,62 @@ def serpapi_google_maps(query: str, location: str, api_key: str, num_results: in
         return []
 
 
+# NOVA VERSÃO DA FUNÇÃO PARA A ROTA 2
 @st.cache_data(ttl=60 * 30)
-def brasilapi_busca_empresas(termo: str, uf: str | None = None, max_empresas: int = 40) -> list[dict]:
-    """Busca simplificada usando BrasilAPI + pública, sem scraping."""
-    if not termo:
+def buscar_empresas_por_cnae(query_cnae: str, uf: str, max_empresas: int) -> list[dict]:
+    """Busca empresas reais por código ou descrição de CNAE."""
+    if not query_cnae:
         return []
 
-    url = f"https://publica.cnpj.ws/cnaes"
-    r = http_get(url, timeout=20)
-    if not r:
+    cnae_code = None
+    # Verifica se a query parece um código CNAE
+    if re.search(r'\d', query_cnae):
+        cnae_code = re.sub(r'\D', '', query_cnae) # Limpa para usar na API
+    else:
+        # Se não for um código, busca a descrição na lista de CNAEs
+        r_cnaes = http_get("https://publica.cnpj.ws/cnaes")
+        if r_cnaes:
+            try:
+                lista_cnaes = r_cnaes.json()
+                for cnae_item in lista_cnaes:
+                    if query_cnae.lower() in (cnae_item.get("descricao") or "").lower():
+                        cnae_code = str(cnae_item.get("codigo"))
+                        break
+            except Exception:
+                st.error("Não foi possível encontrar um código CNAE para a descrição fornecida.")
+                return []
+
+    if not cnae_code:
+        st.warning(f"Nenhum código CNAE encontrado para '{query_cnae}'.")
         return []
+
+    # Busca real de empresas usando o código CNAE na API publica.cnpj.ws
+    st.info(f"Buscando empresas com CNAE: {cnae_code}...")
+    url = f"https://publica.cnpj.ws/v2/empresas?cnae={cnae_code}&uf={uf}&page=1"
+    r_empresas = http_get(url)
+    if not r_empresas:
+        st.error("Falha ao buscar empresas na API.")
+        return []
+
     try:
-        cnaes = r.json()
-    except Exception:
+        data = r_empresas.json()
+        results = []
+        empresas_encontradas = data.get("empresas", [])
+        for emp in empresas_encontradas[:max_empresas]:
+            endereco = f"{emp.get('logradouro', '')}, {emp.get('numero', '')} - {emp.get('bairro', '')}, {emp.get('cidade', '')} - {emp.get('estado', '')}"
+            results.append({
+                "Nome": emp.get("razao_social"),
+                "CNPJ": emp.get("cnpj"),
+                "Endereço": endereco,
+                "Telefone": emp.get("telefone1"),
+                "Email": emp.get("email"),
+                "Website": None, # Esta API não fornece website
+                "Origem": f"Busca CNAE ({cnae_code})",
+            })
+        return results
+    except Exception as e:
+        st.error(f"Erro ao processar dados das empresas: {e}")
         return []
-
-    results = []
-    # Aqui fazemos uma simulação: como a BrasilAPI não aceita busca direta por termo, usamos CNAEs + termo
-    for cnae in cnaes[:200]:
-        if termo.lower() in (cnae.get("descricao") or "").lower():
-            results.append(
-                {
-                    "Nome": f"Empresa CNAE {cnae.get('codigo')}",
-                    "CNPJ": None,
-                    "Endereço": uf,
-                    "Telefone": None,
-                    "Email": None,
-                    "Website": None,
-                    "Origem": "BrasilAPI",
-                }
-            )
-        if len(results) >= max_empresas:
-            break
-    return results
 
 
 # ==============================================
@@ -250,12 +275,12 @@ def enriquecer_empresas(empresas: list[dict], *, buscar_cnpj_receita: bool, busc
         msg.write(f"Enriquecendo: {emp.get('Nome') or emp.get('CNPJ') or 'registro'} ({i}/{total})")
         row = dict(emp)
 
-        if buscar_emails and emp.get("Website"):
-            emails = buscar_emails_site(emp["Website"]) or []
+        if buscar_emails and row.get("Website"):
+            emails = buscar_emails_site(row["Website"]) or []
             row["Emails do Site"] = ", ".join(emails) if emails else None
 
-        if buscar_redes and emp.get("Website"):
-            row.update(buscar_redes_sociais(emp["Website"]))
+        if buscar_redes and row.get("Website"):
+            row.update(buscar_redes_sociais(row["Website"]))
 
         base_cnpj = emp.get("CNPJ") or emp.get("CNPJ (Receita)")
         if buscar_cnpj_receita and base_cnpj:
@@ -286,18 +311,18 @@ def main():
         metodo = st.selectbox(
             "Método de aquisição",
             (
-                "Rota 1 – SerpAPI Google Maps",
-                "Rota 2 – BrasilAPI (CNAE por termo)",
+                "Rota 1 – SerpAPI Google Maps (Busca Real)",
+                "Rota 2 – Busca por CNAE (Busca Real Gratuita)",
                 "Rota 3 – Importar CSV",
             ),
         )
 
         col = st.columns(3)
-        termo_busca = "mineradora"  # Default value
+        termo_busca = "prospects"
         
-        if metodo == "Rota 1 – SerpAPI Google Maps":
+        if metodo.startswith("Rota 1"):
             with col[0]:
-                nicho = st.text_input("🎯 Nicho / Query", value="mineradora")
+                nicho = st.text_input("🎯 Nicho / Palavra-chave", value="mineradora")
                 termo_busca = nicho
             with col[1]:
                 local = st.text_input("📍 Localização", value="Pará, Brasil")
@@ -305,14 +330,14 @@ def main():
                 serp_key = st.text_input("🔑 SerpAPI Key", type="password")
             max_r = st.slider("Qtd máx. resultados", 10, 100, 40, 10)
 
-        elif metodo == "Rota 2 – BrasilAPI (CNAE por termo)":
+        elif metodo.startswith("Rota 2"):
             with col[0]:
-                termo = st.text_input("🔎 Termo (ex.: mineradora)", value="mineradora")
-                termo_busca = termo
+                cnae_query = st.text_input("🔎 CNAE (código ou descrição)", value="extração de minério de ferro")
+                termo_busca = cnae_query
             with col[1]:
-                uf = st.selectbox("UF", list(UF_NOMES.keys()), index=list(UF_NOMES.keys()).index("PA"))
+                uf = st.selectbox("Estado (UF)", list(UF_NOMES.keys()), index=list(UF_NOMES.keys()).index("MG"))
             with col[2]:
-                max_r = st.slider("Qtd máx. empresas", 10, 100, 40, 10)
+                max_r = st.slider("Qtd máx. empresas", 10, 50, 20, 5) # APIs gratuitas tem limite menor
 
         else:
             up = st.file_uploader("Envie um CSV com CNPJ, Nome, Website", type=["csv"])
@@ -329,17 +354,17 @@ def main():
             termo_busca = "importado"
 
         st.markdown("---")
-        use_receita = st.checkbox("Validar em Receita (CNPJ/CNAE)", value=True)
-        use_emails = st.checkbox("Buscar e-mails no site", value=True)
-        use_social = st.checkbox("Localizar redes sociais", value=False)
+        use_receita = st.checkbox("Enriquecer com dados da Receita (CNPJ/CNAE)", value=True)
+        use_emails = st.checkbox("Buscar e-mails no site (Lento)", value=True)
+        use_social = st.checkbox("Localizar redes sociais no site (Lento)", value=False)
 
         if st.button("🚀 Executar busca e enriquecer", type="primary"):
             registros: list[dict] = []
             with st.spinner("Buscando…"):
-                if metodo == "Rota 1 – SerpAPI Google Maps":
+                if metodo.startswith("Rota 1"):
                     registros = serpapi_google_maps(nicho, local, serp_key, num_results=max_r)
-                elif metodo == "Rota 2 – BrasilAPI (CNAE por termo)":
-                    registros = brasilapi_busca_empresas(termo, uf, max_empresas=max_r)
+                elif metodo.startswith("Rota 2"):
+                    registros = buscar_empresas_por_cnae(cnae_query, uf, max_empresas=max_r)
                 else:
                     if df_import is not None and len(df_import) > 0:
                         tmp = df_import.head(max_r).to_dict(orient="records")
@@ -353,17 +378,18 @@ def main():
                         st.warning("Envie um CSV válido.")
 
             if registros:
-                registros = enriquecer_empresas(
-                    registros,
-                    buscar_cnpj_receita=use_receita,
-                    buscar_redes=use_social,
-                    buscar_emails=use_emails,
-                )
-                st.session_state["resultados"] = registros
                 st.session_state["termo_busca"] = termo_busca
-                st.success(f"{len(registros)} registros enriquecidos!")
+                with st.spinner("Enriquecendo dados..."):
+                    registros = enriquecer_empresas(
+                        registros,
+                        buscar_cnpj_receita=use_receita,
+                        buscar_redes=use_social,
+                        buscar_emails=use_emails,
+                    )
+                st.session_state["resultados"] = registros
+                st.success(f"{len(registros)} registros encontrados e enriquecidos!")
             else:
-                st.warning("Nenhum registro encontrado.")
+                st.warning("Nenhum registro encontrado para os critérios fornecidos.")
                 st.session_state["resultados"] = []
 
 
@@ -376,7 +402,7 @@ def main():
             with colf[0]:
                 filtro_uf = st.selectbox("Filtrar por UF", ["(sem filtro)"] + list(UF_NOMES.keys()))
             with colf[1]:
-                filtra_cnae_ini = st.text_input("CNAE começa com (ex.: 07, 08)")
+                filtra_cnae_ini = st.text_input("CNAE Principal começa com (ex.: 07, 08)")
             with colf[2]:
                 somente_ddd_pa = st.checkbox("DDD 91/93/94", value=False)
 
@@ -384,7 +410,8 @@ def main():
             if filtro_uf != "(sem filtro)":
                 df2 = df2[df2["Endereço"].fillna("").str.contains(filtro_uf, case=False, regex=False)]
             if filtra_cnae_ini:
-                df2 = df2[df2["CNAE Principal"].fillna("").astype(str).str.startswith(filtra_cnae_ini)]
+                df2["CNAE Principal"] = df2["CNAE Principal"].astype(str)
+                df2 = df2[df2["CNAE Principal"].fillna("").str.startswith(filtra_cnae_ini)]
             
             if somente_ddd_pa:
                 df2 = df2[df2["Telefone"].fillna("").str.replace(r'\D', '', regex=True).str[:2].isin(DDD_PA)]
@@ -397,7 +424,6 @@ def main():
     with tab_result:
         st.header("📥 Download dos Resultados")
         
-        # Prioriza o DF filtrado, se não houver, usa o original
         df_final = st.session_state.get("df_filtrado", pd.DataFrame(st.session_state.get("resultados", [])))
 
         if df_final.empty:
@@ -406,7 +432,6 @@ def main():
             st.write(f"Total de registros prontos para exportação: {len(df_final)}")
             st.dataframe(df_final)
 
-            # Preparar o arquivo para download em memória
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 df_final.to_excel(writer, index=False, sheet_name='Prospects')
