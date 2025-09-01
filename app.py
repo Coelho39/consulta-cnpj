@@ -9,14 +9,15 @@ from urllib.parse import urljoin, quote
 
 import requests
 import pandas as pd
-import streamlit as st
+# Removido streamlit para execução em ambiente de desenvolvimento
+# import streamlit as st
 from bs4 import BeautifulSoup
 
 # ==============================================
 # Utilidades
 # ==============================================
 
-APP_TITLE = "🏢 Prospectador B2B – Prospecção Ativa (v7.6 - URL Definitiva)"
+APP_TITLE = "🏢 Prospectador B2B – Prospecção Ativa (v8.0 - Estratégia de Scraping Revisada)"
 
 UF_NOMES = {
     "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas",
@@ -29,34 +30,38 @@ UF_NOMES = {
 }
 
 def slug(s: str) -> str:
+    """Converte uma string para um formato 'slug' amigável para URLs."""
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
 
 def limpa_cnpj(cnpj: str) -> str:
+    """Remove caracteres não numéricos de um CNPJ."""
     return re.sub(r"\D", "", str(cnpj or ""))
 
-DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
-@st.cache_data(ttl=60 * 30)
-def http_get(url: str, timeout: int = 30, headers: dict | None = None) -> requests.Response | None:
+# A anotação @st.cache_data foi removida para permitir a execução fora do Streamlit
+def http_get(url: str, timeout: int = 45, headers: dict | None = None ) -> requests.Response | None:
+    """Realiza uma requisição HTTP GET com tratamento de erros."""
     try:
         h = headers if headers else {"User-Agent": DEFAULT_UA}
+        print(f"Acessando URL: {url}") # Log para depuração
         r = requests.get(url, headers=h, timeout=timeout)
         r.raise_for_status()
         return r
     except requests.exceptions.RequestException as e:
-        st.warning(f"Não foi possível acessar {url}. O site pode estar offline ou bloqueando o acesso. Erro: {e}")
+        print(f"AVISO: Não foi possível acessar {url}. O site pode estar offline ou bloqueando o acesso. Erro: {e}")
         return None
 
 # ==============================================
 # Funções de Enriquecimento
 # ==============================================
-@st.cache_data(ttl=60 * 60)
 def buscar_dados_receita_federal(cnpj: str) -> dict:
+    """Busca dados de um CNPJ na BrasilAPI para enriquecimento."""
     c = limpa_cnpj(cnpj)
     if len(c) != 14: return {}
     url = f"https://brasilapi.com.br/api/cnpj/v1/{c}"
-    r = http_get(url, timeout=20)
+    r = http_get(url, timeout=20 )
     if not r: return {}
     try:
         data = r.json()
@@ -64,61 +69,72 @@ def buscar_dados_receita_federal(cnpj: str) -> dict:
             return {
                 "Nome": data.get("razao_social"), "Nome Fantasia": data.get("nome_fantasia"),
                 "CNPJ": data.get("cnpj"), "Situação Cadastral": data.get("descricao_situacao_cadastral"),
-                "CNAE Principal": data.get("cnae_fiscal"),
+                "CNAE Principal": f"{data.get('cnae_fiscal')} - {data.get('cnae_fiscal_descricao')}",
                 "Endereço": f"{data.get('logradouro', '')}, {data.get('numero', '')} - {data.get('bairro', '')}, {data.get('municipio', '')} - {data.get('uf', '')}",
-                "Telefone": data.get("ddd_telefone_1"),
+                "Telefone": f"({data.get('ddd_telefone_1')})",
+                "Email": data.get("email"),
             }
-    except Exception: return {}
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"ERRO: Falha ao processar JSON da BrasilAPI para o CNPJ {c}. Erro: {e}")
+        return {}
     return {}
 
 # ==============================================
 # Funções para a Prospecção Ativa
 # ==============================================
 
-@st.cache_data(ttl=60 * 60)
 def encontrar_cnaes_por_descricao(descricao: str) -> list[dict]:
+    """Encontra códigos e descrições de CNAE a partir de uma palavra-chave no IBGE."""
     if not descricao: return []
     url = "https://servicodados.ibge.gov.br/api/v2/cnae/subclasses"
-    r = http_get(url)
+    r = http_get(url )
     if not r:
-        st.error("Não foi possível acessar a lista de CNAEs do IBGE.")
+        print("ERRO: Não foi possível acessar a lista de CNAEs do IBGE.")
         return []
     try:
         todos_cnaes = r.json()
         cnaes_encontrados = []
+        termo_busca = descricao.lower()
         for cnae in todos_cnaes:
-            if descricao.lower() in cnae.get("descricao", "").lower():
+            if termo_busca in cnae.get("descricao", "").lower():
                 cnaes_encontrados.append({"codigo": str(cnae.get("id")), "descricao": cnae.get("descricao")})
         return cnaes_encontrados
-    except Exception as e:
-        st.error(f"Erro ao processar lista de CNAEs do IBGE: {e}")
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"ERRO: Erro ao processar lista de CNAEs do IBGE: {e}")
         return []
 
-# ATUALIZAÇÃO: Função de scraping com a construção de URL correta
-@st.cache_data(ttl=60 * 10)
+# --- FUNÇÃO CORRIGIDA ---
 def raspar_cnpjs_consultacnpj(cnae_code: str, cnae_desc: str, uf: str, max_por_cnae: int) -> list[dict]:
-    """Faz web scraping no site consultacnpj.com usando a estrutura de URL com slug."""
+    """
+    Faz web scraping no site consultacnpj.com usando a estrutura de URL corrigida.
+    A nova URL utiliza um 'slug' da descrição do CNAE.
+    Exemplo: 'extracao-de-minerio-de-ferro-cnae-0710301'
+    """
     cnae_limpo = re.sub(r'\D', '', cnae_code)
-    cnae_slug = slug(cnae_desc)
+    cnae_slug = slug(cnae_desc) # Cria o slug a partir da descrição completa
     
-    # Construção da URL correta, baseada na estrutura real do site
-    url = f"https://consultacnpj.com/cnae/{cnae_slug}-cnae-{cnae_limpo}/{uf.lower()}"
-    st.info(f"Acessando: {url}") # Mostra a URL que está sendo acessada para depuração
-
+    # Nova estrutura de URL, mais robusta
+    url = f"https://consultacnpj.com/cnae/{cnae_slug}-cnae-{cnae_limpo}/{uf.lower( )}"
+    
     headers = {
         'User-Agent': DEFAULT_UA,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-        'Referer': 'https://consultacnpj.com/'
+        'Referer': 'https://www.google.com/' # Simula uma origem de tráfego mais comum
     }
     
-    r = http_get(url, headers=headers)
+    r = http_get(url, headers=headers )
     if not r: return []
         
     try:
         soup = BeautifulSoup(r.text, "html.parser")
         empresas = []
-        cards = soup.select(".card.company-card")
+        # Seletor CSS mais específico para os cards de empresa
+        cards = soup.select("div.card.company-card")
         
+        if not cards:
+            print(f"AVISO: Nenhum card de empresa encontrado na página para o CNAE {cnae_code} em {uf}.")
+            return []
+
         for card in cards:
             if len(empresas) >= max_por_cnae: break
             
@@ -133,88 +149,71 @@ def raspar_cnpjs_consultacnpj(cnae_code: str, cnae_desc: str, uf: str, max_por_c
                 })
         return empresas
     except Exception as e:
-        st.warning(f"Erro ao raspar dados para o CNAE {cnae_code}: {e}")
+        print(f"AVISO: Erro ao raspar dados para o CNAE {cnae_code}: {e}")
         return []
 
 # ==============================================
-# Orquestração Principal (Interface)
+# Orquestração Principal (Simulação)
 # ==============================================
 
-def main():
-    st.set_page_config(page_title=APP_TITLE, page_icon="🏢", layout="wide")
-    st.title(APP_TITLE)
+def executar_prospeccao():
+    """Função principal que orquestra a prospecção."""
+    # Parâmetros da sua busca
+    atividade = "extração de minério de ferro"
+    uf = "PA"
+    max_cnaes = 3
+    max_empresas_por_cnae = 10
 
-    metodo = st.selectbox(
-        "Selecione o modo de operação",
-        ("---", "Prospecção Ativa por Atividade (CNAE)",)
-    )
+    print(f"--- Iniciando Prospecção Ativa para '{atividade}' em '{uf}' ---")
 
-    if metodo == "Prospecção Ativa por Atividade (CNAE)":
-        st.subheader("🔎 Prospecção por Atividade Empresarial")
-        st.markdown("Esta ferramenta busca CNAEs no IBGE e depois raspa dados do site `consultacnpj.com`.")
+    cnaes_encontrados = encontrar_cnaes_por_descricao(atividade)
+    if not cnaes_encontrados:
+        print(f"Nenhum CNAE encontrado para '{atividade}'. Encerrando.")
+        return
+
+    print(f"Sucesso! Encontramos {len(cnaes_encontrados)} CNAEs. Investigando os {max_cnaes} primeiros.")
+    todos_registros = []
+    
+    for i, cnae in enumerate(cnaes_encontrados[:max_cnaes]):
+        cnae_cod, cnae_desc = cnae['codigo'], cnae['descricao']
+        print(f"\nPasso {i+1}/{max_cnaes}: Buscando empresas para CNAE {cnae_cod} ('{cnae_desc[:50]}...')")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            atividade = st.text_input("Digite a atividade", value="extração de minério de ferro")
-        with col2:
-            uf = st.selectbox("Selecione o Estado (UF)", list(UF_NOMES.keys()), index=list(UF_NOMES.keys()).index("PA"))
-        
-        max_cnaes = st.slider("Máximo de CNAEs a investigar", 1, 10, 3)
-        max_empresas_por_cnae = st.slider("Máximo de empresas por CNAE", 5, 50, 10)
+        registros_cnae = raspar_cnpjs_consultacnpj(cnae_cod, cnae_desc, uf, max_empresas_por_cnae)
+        if registros_cnae:
+            print(f"  -> Encontradas {len(registros_cnae)} empresas.")
+            todos_registros.extend(registros_cnae)
+        else:
+            print("  -> Nenhuma empresa encontrada para este CNAE/UF.")
+        time.sleep(random.uniform(1.5, 3.0)) # Pausa para não sobrecarregar o servidor
 
-        if st.button("🚀 Iniciar Prospecção Ativa", type="primary"):
-            cnaes_encontrados = encontrar_cnaes_por_descricao(atividade)
-            if not cnaes_encontrados:
-                st.error(f"Nenhum CNAE encontrado para '{atividade}'.")
-                return
+    if not todos_registros:
+        print("\nA busca por empresas não retornou resultados. Verifique os parâmetros ou a disponibilidade do site.")
+        return
+    
+    print(f"\n--- Busca inicial concluída. {len(todos_registros)} empresas encontradas. Enriquecendo dados... ---")
+    registros_finais = []
+    
+    for i, reg in enumerate(todos_registros):
+        print(f"Enriquecendo {i+1}/{len(todos_registros)}: {reg.get('Nome')} ({reg.get('CNPJ')})")
+        dados_ricos = buscar_dados_receita_federal(reg.get("CNPJ"))
+        if dados_ricos:
+            registros_finais.append(dados_ricos)
+        time.sleep(0.5) # Pausa para não exceder limites da API
 
-            st.success(f"Encontramos {len(cnaes_encontrados)} CNAEs. Investigando os {max_cnaes} primeiros.")
-            todos_registros = []
-            pb = st.progress(0, "Passo 2: Buscando empresas...")
-            
-            for i, cnae in enumerate(cnaes_encontrados[:max_cnaes]):
-                cnae_cod, cnae_desc = cnae['codigo'], cnae['descricao']
-                pb.progress((i + 1) / max_cnaes, f"Buscando em '{cnae_desc[:50]}...'")
-                
-                # ATUALIZAÇÃO: Passando a descrição do CNAE para a função de scraping
-                registros_cnae = raspar_cnpjs_consultacnpj(cnae_cod, cnae_desc, uf, max_empresas_por_cnae)
-                todos_registros.extend(registros_cnae)
-                time.sleep(random.uniform(1, 2))
+    print("\n--- Prospecção e enriquecimento concluídos! ---")
+    
+    if registros_finais:
+        df_final = pd.DataFrame(registros_finais)
+        # Salvar em Excel
+        nome_arquivo = f"prospects_{slug(atividade)}_{uf.lower()}.xlsx"
+        df_final.to_excel(nome_arquivo, index=False, engine='xlsxwriter')
+        print(f"\nResultados salvos com sucesso no arquivo: {nome_arquivo}")
+        print("\nPré-visualização dos dados:")
+        print(df_final.head())
+    else:
+        print("\nNenhum dado de empresa pôde ser enriquecido.")
 
-            pb.empty()
-            if not todos_registros:
-                st.warning("A busca por empresas não retornou resultados.")
-                return
-            
-            st.info(f"Busca inicial concluída. {len(todos_registros)} empresas encontradas. Enriquecendo...")
-            registros_finais = []
-            pb_enriquecimento = st.progress(0, "Passo 3: Enriquecendo dados...")
-            
-            for i, reg in enumerate(todos_registros):
-                pb_enriquecimento.progress((i + 1) / len(todos_registros), f"Enriquecendo {reg.get('Nome')[:40]}...")
-                dados_ricos = buscar_dados_receita_federal(reg.get("CNPJ"))
-                if dados_ricos: registros_finais.append(dados_ricos)
-
-            pb_enriquecimento.empty()
-            st.session_state["resultados"] = registros_finais
-            st.success("Prospecção e enriquecimento concluídos!")
-
-    if "resultados" in st.session_state and st.session_state["resultados"]:
-        st.header("📊 Resultados")
-        df_final = pd.DataFrame(st.session_state.get("resultados", []))
-        st.dataframe(df_final)
-        
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df_final.to_excel(writer, index=False, sheet_name='Prospects')
-        excel_data = output.getvalue()
-        
-        st.download_button(
-            label="📥 Baixar resultados em Excel (.xlsx)",
-            data=excel_data,
-            file_name=f"prospects_{slug(metodo if metodo != '---' else 'resultados')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
+# Executa a função principal
 if __name__ == "__main__":
-    main()
+    executar_prospeccao()
+
